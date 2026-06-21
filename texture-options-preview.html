@@ -1,0 +1,542 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Gallaxy TTS Texture Options</title>
+  <style>
+    :root {
+      --page-bg: #070706;
+      --text-main: #e9e3d5;
+      --text-muted: rgba(233, 227, 213, 0.64);
+      --maroon: #6b1f26;
+      --maroon-hot: #a63a43;
+      --green: #566b57;
+      --border: rgba(233, 227, 213, 0.14);
+      --black: #050403;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--text-main);
+      background:
+        radial-gradient(circle at 50% -10%, rgba(166, 58, 67, 0.28), transparent 36rem),
+        linear-gradient(180deg, #080707, #030303 78%);
+      font-family: Rubik, Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+    }
+
+    main {
+      width: min(1480px, calc(100vw - 48px));
+      margin: 0 auto;
+      padding: 34px 0 44px;
+    }
+
+    header {
+      display: flex;
+      align-items: end;
+      justify-content: space-between;
+      gap: 24px;
+      margin-bottom: 24px;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 18px;
+    }
+
+    h1 {
+      margin: 0;
+      font-family: Oxanium, ui-sans-serif, system-ui, sans-serif;
+      font-size: clamp(26px, 3vw, 42px);
+      font-weight: 700;
+      letter-spacing: 0;
+      color: var(--text-main);
+    }
+
+    .hint {
+      max-width: 580px;
+      margin: 0;
+      color: var(--text-muted);
+      font-size: 14px;
+      line-height: 1.55;
+      text-align: right;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 18px;
+    }
+
+    .option {
+      min-height: 360px;
+      border: 1px solid var(--border);
+      background:
+        linear-gradient(145deg, rgba(233, 227, 213, 0.05), rgba(233, 227, 213, 0.015)),
+        rgba(7, 7, 6, 0.84);
+      padding: 16px;
+      overflow: hidden;
+      position: relative;
+    }
+
+    .option::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      background:
+        linear-gradient(90deg, transparent, rgba(233, 227, 213, 0.05), transparent),
+        radial-gradient(circle at 8% 12%, rgba(166, 58, 67, 0.16), transparent 16rem);
+      opacity: 0.9;
+    }
+
+    .option-header {
+      position: relative;
+      z-index: 2;
+      display: flex;
+      align-items: start;
+      justify-content: space-between;
+      gap: 16px;
+      min-height: 68px;
+      margin-bottom: 10px;
+    }
+
+    h2 {
+      margin: 0 0 6px;
+      color: var(--maroon-hot);
+      font-family: Oxanium, ui-sans-serif, system-ui, sans-serif;
+      font-size: 15px;
+      font-weight: 700;
+      letter-spacing: 0;
+      text-transform: uppercase;
+    }
+
+    .option p {
+      margin: 0;
+      color: var(--text-muted);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
+    .tag {
+      flex: 0 0 auto;
+      border: 1px solid rgba(233, 227, 213, 0.18);
+      color: rgba(233, 227, 213, 0.76);
+      background: rgba(233, 227, 213, 0.045);
+      padding: 6px 8px;
+      font-family: Oxanium, ui-sans-serif, system-ui, sans-serif;
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+
+    .stage {
+      position: relative;
+      z-index: 1;
+      height: 238px;
+      display: grid;
+      place-items: center;
+      border: 1px solid rgba(233, 227, 213, 0.08);
+      background:
+        radial-gradient(circle at 50% 45%, rgba(166, 58, 67, 0.10), transparent 19rem),
+        #040403;
+    }
+
+    .widget {
+      position: relative;
+      width: 430px;
+      height: 182px;
+      display: grid;
+      place-items: center;
+      filter: drop-shadow(0 16px 26px rgba(0, 0, 0, 0.55));
+    }
+
+    .wing {
+      position: absolute;
+      top: 11px;
+      width: 92px;
+      height: 160px;
+      border: 1px solid rgba(0, 0, 0, 0.42);
+      box-shadow:
+        inset 0 2px 12px rgba(255, 255, 255, 0.13),
+        inset 0 -18px 34px rgba(0, 0, 0, 0.56),
+        0 0 18px rgba(166, 58, 67, 0.28);
+    }
+
+    .wing.left {
+      left: 0;
+      border-radius: 48% 22% 22% 48% / 50% 18% 18% 50%;
+    }
+
+    .wing.right {
+      right: 0;
+      border-radius: 22% 48% 48% 22% / 18% 50% 50% 18%;
+    }
+
+    .deck {
+      position: relative;
+      z-index: 2;
+      width: 298px;
+      height: 182px;
+      border-radius: 26px;
+      padding: 16px;
+      border: 2px solid rgba(0, 0, 0, 0.62);
+      box-shadow:
+        inset 0 2px 0 rgba(255, 255, 255, 0.16),
+        inset 0 -28px 42px rgba(0, 0, 0, 0.46),
+        0 0 22px rgba(166, 58, 67, 0.32);
+    }
+
+    .screen {
+      height: 104px;
+      border-radius: 8px;
+      background:
+        linear-gradient(100deg, rgba(166, 58, 67, 0.13), transparent 55%),
+        #030302;
+      border: 1px solid rgba(233, 227, 213, 0.12);
+      box-shadow: inset 0 0 18px rgba(0, 0, 0, 0.85);
+      padding: 12px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      color: rgba(233, 227, 213, 0.86);
+      font-size: 9px;
+      line-height: 1.7;
+    }
+
+    .screen strong {
+      display: block;
+      margin-bottom: 5px;
+      color: var(--maroon-hot);
+      font-family: Oxanium, ui-sans-serif, system-ui, sans-serif;
+      font-size: 10px;
+    }
+
+    .controls {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      height: 45px;
+    }
+
+    .play,
+    .stop {
+      display: grid;
+      place-items: center;
+      border: 1px solid rgba(233, 227, 213, 0.16);
+      background:
+        radial-gradient(circle at 35% 25%, rgba(233, 227, 213, 0.28), transparent 28%),
+        rgba(107, 31, 38, 0.8);
+      box-shadow: inset 0 -8px 18px rgba(0, 0, 0, 0.42);
+    }
+
+    .play {
+      width: 38px;
+      height: 38px;
+      border-radius: 50%;
+    }
+
+    .play::before {
+      content: "";
+      margin-left: 3px;
+      border-left: 14px solid var(--text-main);
+      border-top: 9px solid transparent;
+      border-bottom: 9px solid transparent;
+    }
+
+    .stop {
+      width: 32px;
+      height: 32px;
+      border-radius: 10px;
+    }
+
+    .stop::before {
+      content: "";
+      width: 12px;
+      height: 12px;
+      border-radius: 2px;
+      background: var(--text-main);
+    }
+
+    .slider {
+      flex: 1;
+      height: 7px;
+      border-radius: 999px;
+      background:
+        linear-gradient(90deg, var(--maroon-hot), rgba(86, 107, 87, 0.35) 58%, #090807);
+      box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.75);
+      position: relative;
+    }
+
+    .slider::after {
+      content: "";
+      position: absolute;
+      left: 54%;
+      top: 50%;
+      width: 19px;
+      height: 19px;
+      border-radius: 50%;
+      transform: translate(-50%, -50%);
+      background:
+        radial-gradient(circle at 32% 25%, #fff5e7, #cfc7b7 38%, #827b70 100%);
+      box-shadow: 0 2px 5px rgba(0, 0, 0, 0.45);
+    }
+
+    .speaker {
+      position: absolute;
+      left: 50%;
+      width: 48px;
+      height: 48px;
+      transform: translateX(-50%);
+      border-radius: 50%;
+      background:
+        radial-gradient(circle at 38% 30%, #fff7e9 0 9%, #bfb6a5 16%, #6f665a 31%, #171412 60%, #050403 100%);
+      border: 2px solid rgba(233, 227, 213, 0.38);
+      box-shadow:
+        inset 0 0 9px rgba(255, 255, 255, 0.22),
+        0 3px 9px rgba(0, 0, 0, 0.5);
+    }
+
+    .speaker:nth-child(1) { top: 20px; }
+    .speaker:nth-child(2) { top: 66px; width: 44px; height: 44px; }
+    .speaker:nth-child(3) { top: 110px; width: 40px; height: 40px; }
+
+    .procedural .wing,
+    .procedural .deck {
+      background:
+        linear-gradient(115deg, rgba(255, 238, 224, 0.42) 0%, rgba(255, 238, 224, 0.05) 15%, transparent 23%),
+        linear-gradient(155deg, #d66b6f 0%, #8e2b35 22%, #3d1117 46%, #a63a43 67%, #566b57 100%);
+    }
+
+    .raster .wing,
+    .raster .deck {
+      background:
+        radial-gradient(circle at 25% 16%, rgba(255, 240, 225, 0.40), transparent 16%),
+        repeating-linear-gradient(101deg, rgba(255, 255, 255, 0.12) 0 1px, transparent 1px 6px),
+        repeating-linear-gradient(13deg, rgba(0, 0, 0, 0.16) 0 1px, transparent 1px 5px),
+        linear-gradient(145deg, #c3525c, #6b1f26 42%, #2f0e12 70%, #7d3038);
+      background-blend-mode: screen, overlay, multiply, normal;
+    }
+
+    .pbr .wing,
+    .pbr .deck {
+      background:
+        radial-gradient(circle at 68% 24%, rgba(255, 255, 255, 0.74), transparent 6%),
+        radial-gradient(circle at 24% 14%, rgba(255, 225, 210, 0.44), transparent 19%),
+        repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.11) 0 2px, rgba(0, 0, 0, 0.12) 2px 5px, transparent 5px 9px),
+        linear-gradient(135deg, #f58b8b 0%, #8a2730 19%, #380c10 47%, #a63a43 64%, #272b24 100%);
+      background-blend-mode: screen, screen, soft-light, normal;
+      filter: contrast(1.08) saturate(1.18);
+    }
+
+    .skin .widget {
+      width: 450px;
+    }
+
+    .skin .wing {
+      width: 106px;
+      height: 174px;
+      top: 3px;
+      background:
+        radial-gradient(circle at 42% 22%, rgba(255, 240, 225, 0.55), transparent 18%),
+        conic-gradient(from 230deg at 50% 50%, #170405, #a63a43, #e27f85, #6b1f26, #11120f, #6b1f26, #170405);
+    }
+
+    .skin .wing.left {
+      border-radius: 72px 20px 62px 84px / 54px 20px 62px 85px;
+      transform: skewY(-4deg);
+    }
+
+    .skin .wing.right {
+      border-radius: 20px 72px 84px 62px / 20px 54px 85px 62px;
+      transform: skewY(4deg);
+    }
+
+    .skin .deck {
+      width: 300px;
+      height: 188px;
+      border-radius: 34px 22px 38px 24px / 28px 42px 24px 38px;
+      background:
+        radial-gradient(circle at 16% 78%, rgba(255, 238, 224, 0.18), transparent 16%),
+        radial-gradient(circle at 84% 20%, rgba(255, 238, 224, 0.24), transparent 20%),
+        linear-gradient(148deg, #b33c45, #421015 36%, #070706 56%, #7e3038 80%, #566b57);
+    }
+
+    .notes {
+      position: relative;
+      z-index: 2;
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+      margin-top: 12px;
+    }
+
+    .note {
+      border-top: 1px solid rgba(233, 227, 213, 0.12);
+      padding-top: 8px;
+      min-height: 48px;
+    }
+
+    .note b {
+      display: block;
+      margin-bottom: 3px;
+      color: rgba(233, 227, 213, 0.86);
+      font-family: Oxanium, ui-sans-serif, system-ui, sans-serif;
+      font-size: 10px;
+      text-transform: uppercase;
+    }
+
+    .note span {
+      color: var(--text-muted);
+      font-size: 11px;
+      line-height: 1.35;
+    }
+
+    @media (max-width: 980px) {
+      main {
+        width: min(760px, calc(100vw - 28px));
+      }
+
+      header {
+        display: block;
+      }
+
+      .hint {
+        text-align: left;
+        margin-top: 10px;
+      }
+
+      .grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    @media (max-width: 560px) {
+      .stage {
+        overflow-x: auto;
+        justify-content: start;
+        padding: 0 16px;
+      }
+
+      .widget {
+        transform: scale(0.84);
+        transform-origin: center;
+      }
+
+      .notes {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>Gallaxy TTS Texture Options</h1>
+      <p class="hint">Same approximate widget silhouette, four material strategies. This is only for choosing direction; after approval I can translate the chosen look into the native SwiftUI app.</p>
+    </header>
+
+    <section class="grid" aria-label="Texture options">
+      <article class="option procedural">
+        <div class="option-header">
+          <div>
+            <h2>1. Procedural SwiftUI Chrome</h2>
+            <p>Layered gradients, highlights, shadows, and specular streaks made in code.</p>
+          </div>
+          <span class="tag">Best first pass</span>
+        </div>
+        <div class="stage">
+          <div class="widget">
+            <div class="wing left"><span class="speaker"></span><span class="speaker"></span><span class="speaker"></span></div>
+            <div class="deck">
+              <div class="screen"><strong>GALLAXY TTS CONSOLE</strong>&gt; ready<br>&gt; chrome red shell<br>&gt; scalable code material</div>
+              <div class="controls"><span class="play"></span><span class="stop"></span><span class="slider"></span></div>
+            </div>
+            <div class="wing right"><span class="speaker"></span><span class="speaker"></span><span class="speaker"></span></div>
+          </div>
+        </div>
+        <div class="notes">
+          <div class="note"><b>Speed</b><span>Fastest to build.</span></div>
+          <div class="note"><b>Resize</b><span>Very safe.</span></div>
+          <div class="note"><b>Risk</b><span>Can look too clean.</span></div>
+        </div>
+      </article>
+
+      <article class="option raster">
+        <div class="option-header">
+          <div>
+            <h2>2. Raster Texture Overlay</h2>
+            <p>A painted or generated red metal image is masked into the shell and speaker wings.</p>
+          </div>
+          <span class="tag">More tactile</span>
+        </div>
+        <div class="stage">
+          <div class="widget">
+            <div class="wing left"><span class="speaker"></span><span class="speaker"></span><span class="speaker"></span></div>
+            <div class="deck">
+              <div class="screen"><strong>GALLAXY TTS CONSOLE</strong>&gt; ready<br>&gt; texture overlay<br>&gt; brushed + noisy finish</div>
+              <div class="controls"><span class="play"></span><span class="stop"></span><span class="slider"></span></div>
+            </div>
+            <div class="wing right"><span class="speaker"></span><span class="speaker"></span><span class="speaker"></span></div>
+          </div>
+        </div>
+        <div class="notes">
+          <div class="note"><b>Speed</b><span>Medium.</span></div>
+          <div class="note"><b>Resize</b><span>Needs careful tiling.</span></div>
+          <div class="note"><b>Risk</b><span>Can blur or stretch.</span></div>
+        </div>
+      </article>
+
+      <article class="option pbr">
+        <div class="option-header">
+          <div>
+            <h2>3. PBR Material Source</h2>
+            <p>Use metal/roughness/normal-map style sources, then bake a red chrome surface for the UI.</p>
+          </div>
+          <span class="tag">Most material-like</span>
+        </div>
+        <div class="stage">
+          <div class="widget">
+            <div class="wing left"><span class="speaker"></span><span class="speaker"></span><span class="speaker"></span></div>
+            <div class="deck">
+              <div class="screen"><strong>GALLAXY TTS CONSOLE</strong>&gt; ready<br>&gt; roughness + metal maps<br>&gt; baked for SwiftUI</div>
+              <div class="controls"><span class="play"></span><span class="stop"></span><span class="slider"></span></div>
+            </div>
+            <div class="wing right"><span class="speaker"></span><span class="speaker"></span><span class="speaker"></span></div>
+          </div>
+        </div>
+        <div class="notes">
+          <div class="note"><b>Speed</b><span>Slowest setup.</span></div>
+          <div class="note"><b>Resize</b><span>Good if baked well.</span></div>
+          <div class="note"><b>Risk</b><span>Overkill for flat UI.</span></div>
+        </div>
+      </article>
+
+      <article class="option skin">
+        <div class="option-header">
+          <div>
+            <h2>4. Full Custom Skin</h2>
+            <p>Old-school media-player route: one designed bitmap shell with controls fitted into it.</p>
+          </div>
+          <span class="tag">Most retro</span>
+        </div>
+        <div class="stage">
+          <div class="widget">
+            <div class="wing left"><span class="speaker"></span><span class="speaker"></span><span class="speaker"></span></div>
+            <div class="deck">
+              <div class="screen"><strong>GALLAXY TTS CONSOLE</strong>&gt; ready<br>&gt; fixed custom skin<br>&gt; wild silhouette possible</div>
+              <div class="controls"><span class="play"></span><span class="stop"></span><span class="slider"></span></div>
+            </div>
+            <div class="wing right"><span class="speaker"></span><span class="speaker"></span><span class="speaker"></span></div>
+          </div>
+        </div>
+        <div class="notes">
+          <div class="note"><b>Speed</b><span>Design-heavy.</span></div>
+          <div class="note"><b>Resize</b><span>Hardest.</span></div>
+          <div class="note"><b>Risk</b><span>Least flexible.</span></div>
+        </div>
+      </article>
+    </section>
+  </main>
+</body>
+</html>
