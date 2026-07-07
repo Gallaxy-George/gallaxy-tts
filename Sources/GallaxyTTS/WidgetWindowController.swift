@@ -1,37 +1,38 @@
 import AppKit
+import QuartzCore
 import SwiftUI
 
 enum VoiceProviderOption: String, CaseIterable, Identifiable {
-    case localPiper = "localPiper"
+    case localKokoro = "localKokoro"
     case elevenLabs = "elevenLabs"
-    case geminiFlash = "geminiFlash"
-    case customAPI = "customAPI"
 
     var id: String { rawValue }
 
+    static func savedValue(_ rawValue: String?) -> VoiceProviderOption {
+        guard let rawValue else { return .localKokoro }
+        switch rawValue {
+        case VoiceProviderOption.elevenLabs.rawValue:
+            return .elevenLabs
+        default:
+            return .localKokoro
+        }
+    }
+
     var title: String {
         switch self {
-        case .localPiper:
-            return "LOCAL PIPER"
+        case .localKokoro:
+            return "LOCAL"
         case .elevenLabs:
-            return "ELEVENLABS"
-        case .geminiFlash:
-            return "GEMINI FLASH"
-        case .customAPI:
-            return "CUSTOM API"
+            return "CLOUD"
         }
     }
 
     var detail: String {
         switch self {
-        case .localPiper:
-            return "free local voice"
+        case .localKokoro:
+            return "Kokoro 82M"
         case .elevenLabs:
-            return "cloud voice"
-        case .geminiFlash:
-            return "flash voice"
-        case .customAPI:
-            return "bring your own"
+            return "ElevenLabs"
         }
     }
 }
@@ -40,6 +41,47 @@ enum WidgetPlayResult {
     case selection(String)
     case clipboard(String)
     case empty
+}
+
+struct ClipboardClip: Identifiable, Codable {
+    let id: UUID
+    let text: String
+    let source: String
+    let createdAt: Date
+
+    init(id: UUID = UUID(), text: String, source: String, createdAt: Date = Date()) {
+        self.id = id
+        self.text = text
+        self.source = source
+        self.createdAt = createdAt
+    }
+
+    var title: String {
+        let words = normalizedText
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { $0.count > 2 }
+            .prefix(3)
+        let title = words.joined(separator: " ")
+        return title.isEmpty ? "CLIP" : title.uppercased()
+    }
+
+    var preview: String {
+        let lines = text
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .prefix(2)
+        let preview = lines.joined(separator: " / ")
+        guard !preview.isEmpty else { return "(empty)" }
+        return preview.count > 94 ? String(preview.prefix(91)) + "..." : preview
+    }
+
+    private var normalizedText: String {
+        text
+            .replacingOccurrences(of: "\u{00a0}", with: " ")
+            .replacingOccurrences(of: "https://", with: " ")
+            .replacingOccurrences(of: "http://", with: " ")
+    }
 }
 
 final class WidgetWindowController: NSWindowController, NSWindowDelegate {
@@ -127,11 +169,13 @@ final class GallaxyTTSWidgetViewModel: ObservableObject {
     @Published var isPinned = false
     @Published var leftDrawerExpanded = false
     @Published var rightDrawerExpanded = false
-    @Published var selectedVoiceProvider: VoiceProviderOption = .localPiper
+    @Published var selectedVoiceProvider: VoiceProviderOption = .localKokoro
     @Published var elevenLabsAPIKeyDraft = ""
     @Published var hasElevenLabsAPIKey = false
     @Published var credentialMessage = ""
     @Published var speakerLevel: Double = 0
+    @Published var currentClipboardClip: ClipboardClip?
+    @Published var recentClipboardClips: [ClipboardClip] = []
     @Published var consoleLines = [
         "GALLAXY TTS CONSOLE",
         "> ready",
@@ -147,14 +191,22 @@ final class GallaxyTTSWidgetViewModel: ObservableObject {
     private let leftDrawerDefaultsKey = "leftDrawerExpanded"
     private let rightDrawerDefaultsKey = "rightDrawerExpanded"
     private let voiceProviderDefaultsKey = "voiceProvider"
+    private let clipboardHistoryDefaultsKey = "clipboardHistory"
+    private let pasteboard = NSPasteboard.general
+    private let maxClipboardHistory = 8
+    private let maxStoredClipCharacters = 16_000
     private var hasStartedPlayback = false
+    private var clipboardHistory: [ClipboardClip] = []
+    private var lastPasteboardChangeCount = 0
+    private var clipboardPollTimer: Timer?
 
     static let sideSpeakerWidth: CGFloat = 118
     static let mainDeckWidth: CGFloat = 430
     static let drawerPanelWidth: CGFloat = 238
-    static let drawerPanelHeight: CGFloat = 312
+    static let drawerPanelHeight: CGFloat = 310
     static let interSectionOverlap: CGFloat = 22
     static let widgetHeight: CGFloat = 350
+    static let drawerAnimationDuration: TimeInterval = 0.36
     static let minimumWidgetScale: CGFloat = 0.5
     static let maximumWidgetScale: CGFloat = 1.4
     static let collapsedWindowWidth: CGFloat = (sideSpeakerWidth * 2) + mainDeckWidth - (interSectionOverlap * 2)
@@ -179,10 +231,10 @@ final class GallaxyTTSWidgetViewModel: ObservableObject {
         self.isPinned = defaults.bool(forKey: pinnedDefaultsKey)
         self.leftDrawerExpanded = defaults.bool(forKey: leftDrawerDefaultsKey)
         self.rightDrawerExpanded = defaults.bool(forKey: rightDrawerDefaultsKey)
-        if let savedProvider = defaults.string(forKey: voiceProviderDefaultsKey),
-           let provider = VoiceProviderOption(rawValue: savedProvider) {
-            self.selectedVoiceProvider = provider
-        }
+        self.selectedVoiceProvider = VoiceProviderOption.savedValue(defaults.string(forKey: voiceProviderDefaultsKey))
+        loadClipboardHistory()
+        refreshClipboardSnapshot()
+        startClipboardPolling()
         refreshElevenLabsCredentialState()
         router.activityHandler = { [weak self] in
             DispatchQueue.main.async {
@@ -196,11 +248,16 @@ final class GallaxyTTSWidgetViewModel: ObservableObject {
         }
     }
 
+    deinit {
+        clipboardPollTimer?.invalidate()
+    }
+
     func refresh() {
         speed = router.speechSpeedMultiplier
         status = router.statusLine
         isSpeaking = router.isSpeaking
         isPaused = router.isPaused
+        refreshClipboardSnapshot(record: false)
         if !isSpeaking && !isPaused {
             speakerLevel = 0
         }
@@ -230,21 +287,23 @@ final class GallaxyTTSWidgetViewModel: ObservableObject {
         status = "Reading text"
         consoleLines = [
             "GALLAXY TTS CONSOLE",
-            "> reading selection",
-            "> fallback: clipboard"
+            "> checking clipboard",
+            "> selection if clipboard is empty"
         ]
         switch playHandler() {
         case .selection(let text):
+            rememberClip(text, source: "selection")
             hasStartedPlayback = true
             isPaused = false
             isSpeaking = true
-            status = "Speaking"
+            status = "Preparing voice"
             setSpeakingConsole(source: "selection", text: text)
         case .clipboard(let text):
+            rememberClip(text, source: "clipboard")
             hasStartedPlayback = true
             isPaused = false
             isSpeaking = true
-            status = "Speaking"
+            status = "Preparing voice"
             setSpeakingConsole(source: "clipboard", text: text)
         case .empty:
             isPaused = false
@@ -252,8 +311,8 @@ final class GallaxyTTSWidgetViewModel: ObservableObject {
             status = "No text found"
             consoleLines = [
                 "GALLAXY TTS CONSOLE",
-                "> no selected text",
-                "> clipboard is empty"
+                "> clipboard is empty",
+                "> no quick selection found"
             ]
             NSSound.beep()
         case .none:
@@ -341,18 +400,128 @@ final class GallaxyTTSWidgetViewModel: ObservableObject {
         router.speechSpeedMultiplier = speed
     }
 
-    func toggleLeftDrawer() {
+    func setLeftDrawerExpanded(_ expanded: Bool) {
+        guard leftDrawerExpanded != expanded else { return }
         let previousWidgetWidth = widgetWidth
-        leftDrawerExpanded.toggle()
+        let preservedMainDeckMinX = mainDeckScreenMinX(previousWidgetWidth: previousWidgetWidth)
+        leftDrawerExpanded = expanded
         defaults.set(leftDrawerExpanded, forKey: leftDrawerDefaultsKey)
-        applyDrawerWindowSize(animated: true, anchor: .right, previousWidgetWidth: previousWidgetWidth)
+        applyDrawerWindowSize(
+            animated: false,
+            anchor: .right,
+            previousWidgetWidth: previousWidgetWidth,
+            preservedMainDeckMinX: preservedMainDeckMinX
+        )
     }
 
-    func toggleRightDrawer() {
+    func setRightDrawerExpanded(_ expanded: Bool) {
+        guard rightDrawerExpanded != expanded else { return }
         let previousWidgetWidth = widgetWidth
-        rightDrawerExpanded.toggle()
+        let preservedMainDeckMinX = mainDeckScreenMinX(previousWidgetWidth: previousWidgetWidth)
+        rightDrawerExpanded = expanded
+        if rightDrawerExpanded {
+            refreshClipboardSnapshot()
+        }
         defaults.set(rightDrawerExpanded, forKey: rightDrawerDefaultsKey)
-        applyDrawerWindowSize(animated: true, anchor: .left, previousWidgetWidth: previousWidgetWidth)
+        applyDrawerWindowSize(
+            animated: false,
+            anchor: .left,
+            previousWidgetWidth: previousWidgetWidth,
+            preservedMainDeckMinX: preservedMainDeckMinX
+        )
+    }
+
+    func speakClip(_ clip: ClipboardClip) {
+        rememberClip(clip.text, source: clip.source)
+        hasStartedPlayback = true
+        isPaused = false
+        isSpeaking = true
+        status = "Preparing voice"
+        setSpeakingConsole(source: "clip", text: clip.text)
+        router.speak(clip.text, source: "clip history")
+    }
+
+    func refreshClipboardSnapshot(record: Bool = true) {
+        lastPasteboardChangeCount = pasteboard.changeCount
+        guard let text = clipboardText() else {
+            currentClipboardClip = nil
+            updateRecentClipboardClips()
+            return
+        }
+
+        let clip = ClipboardClip(text: trimmedStoredText(text), source: "clipboard")
+        currentClipboardClip = clip
+        if record {
+            rememberClip(clip.text, source: clip.source)
+        } else {
+            updateRecentClipboardClips()
+        }
+    }
+
+    private func startClipboardPolling() {
+        lastPasteboardChangeCount = pasteboard.changeCount
+        let timer = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                guard self.pasteboard.changeCount != self.lastPasteboardChangeCount else { return }
+                self.refreshClipboardSnapshot()
+            }
+        }
+        clipboardPollTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    private func clipboardText() -> String? {
+        guard let text = pasteboard.string(forType: .string) else {
+            return nil
+        }
+
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private func rememberClip(_ text: String, source: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
+        let storedText = trimmedStoredText(trimmed)
+        clipboardHistory.removeAll { $0.text == storedText }
+        clipboardHistory.insert(ClipboardClip(text: storedText, source: source), at: 0)
+        if clipboardHistory.count > maxClipboardHistory {
+            clipboardHistory = Array(clipboardHistory.prefix(maxClipboardHistory))
+        }
+        persistClipboardHistory()
+        updateRecentClipboardClips()
+    }
+
+    private func trimmedStoredText(_ text: String) -> String {
+        if text.count <= maxStoredClipCharacters {
+            return text
+        }
+        return String(text.prefix(maxStoredClipCharacters))
+    }
+
+    private func loadClipboardHistory() {
+        guard let data = defaults.data(forKey: clipboardHistoryDefaultsKey),
+              let clips = try? JSONDecoder().decode([ClipboardClip].self, from: data) else {
+            clipboardHistory = []
+            return
+        }
+        clipboardHistory = Array(clips.prefix(maxClipboardHistory))
+        updateRecentClipboardClips()
+    }
+
+    private func persistClipboardHistory() {
+        guard let data = try? JSONEncoder().encode(clipboardHistory) else { return }
+        defaults.set(data, forKey: clipboardHistoryDefaultsKey)
+    }
+
+    private func updateRecentClipboardClips() {
+        let currentText = currentClipboardClip?.text
+        recentClipboardClips = clipboardHistory
+            .filter { $0.text != currentText }
+            .prefix(maxClipboardHistory)
+            .map { $0 }
     }
 
     func selectVoiceProvider(_ provider: VoiceProviderOption) {
@@ -363,7 +532,8 @@ final class GallaxyTTSWidgetViewModel: ObservableObject {
         if provider == .elevenLabs {
             consoleLines = [
                 "GALLAXY TTS CONSOLE",
-                "> voice source: ELEVENLABS",
+                "> voice source: CLOUD",
+                "> provider: ELEVENLABS",
                 hasElevenLabsAPIKey ? "> api key saved" : "> checking api key"
             ]
             refreshElevenLabsCredentialState(updateConsole: true)
@@ -372,7 +542,8 @@ final class GallaxyTTSWidgetViewModel: ObservableObject {
 
         consoleLines = [
             "GALLAXY TTS CONSOLE",
-            "> voice source: \(provider.title)",
+            "> voice source: LOCAL",
+            "> model: KOKORO 82M",
             "> ready"
         ]
     }
@@ -422,7 +593,8 @@ final class GallaxyTTSWidgetViewModel: ObservableObject {
                 guard updateConsole, self.selectedVoiceProvider == .elevenLabs else { return }
                 self.consoleLines = [
                     "GALLAXY TTS CONSOLE",
-                    "> voice source: ELEVENLABS",
+                    "> voice source: CLOUD",
+                    "> provider: ELEVENLABS",
                     hasKey ? "> api key saved" : "> enter api key"
                 ]
             }
@@ -433,7 +605,8 @@ final class GallaxyTTSWidgetViewModel: ObservableObject {
         animated: Bool,
         anchor: DrawerResizeAnchor = .left,
         preserveCurrentScale: Bool = true,
-        previousWidgetWidth: CGFloat? = nil
+        previousWidgetWidth: CGFloat? = nil,
+        preservedMainDeckMinX: CGFloat? = nil
     ) {
         guard let window else { return }
         let oldWidth = window.frame.width
@@ -445,11 +618,13 @@ final class GallaxyTTSWidgetViewModel: ObservableObject {
 
         var frame = window.frame
         frame.size = NSSize(width: width, height: height)
-        if anchor == .right {
+        if let preservedMainDeckMinX {
+            frame.origin.x = preservedMainDeckMinX - Self.mainDeckXOffset(leftDrawerExpanded: leftDrawerExpanded) * scale
+        } else if anchor == .right {
             frame.origin.x -= width - oldWidth
         }
 
-        if let visibleFrame = window.screen?.visibleFrame ?? NSScreen.main?.visibleFrame {
+        if preservedMainDeckMinX == nil, let visibleFrame = window.screen?.visibleFrame ?? NSScreen.main?.visibleFrame {
             let rightInset: CGFloat = 18
             if frame.maxX > visibleFrame.maxX - rightInset {
                 frame.origin.x = max(visibleFrame.minX + rightInset, visibleFrame.maxX - width - rightInset)
@@ -459,7 +634,28 @@ final class GallaxyTTSWidgetViewModel: ObservableObject {
             }
         }
 
-        window.setFrame(frame, display: true, animate: animated)
+        guard animated else {
+            window.setFrame(frame, display: true)
+            return
+        }
+
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = Self.drawerAnimationDuration
+            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            window.animator().setFrame(frame, display: true)
+        }
+    }
+
+    private func mainDeckScreenMinX(previousWidgetWidth: CGFloat) -> CGFloat? {
+        guard let window else { return nil }
+        let scale = currentWindowScale(previousWidgetWidth: previousWidgetWidth)
+        return window.frame.minX + Self.mainDeckXOffset(leftDrawerExpanded: leftDrawerExpanded) * scale
+    }
+
+    private static func mainDeckXOffset(leftDrawerExpanded: Bool) -> CGFloat {
+        sideSpeakerWidth
+            - interSectionOverlap
+            + (leftDrawerExpanded ? drawerWidthDelta : 0)
     }
 
     private func currentWindowScale(previousWidgetWidth: CGFloat) -> CGFloat {
@@ -485,8 +681,26 @@ final class GallaxyTTSWidgetViewModel: ObservableObject {
         if isPaused {
             return "PAUSED"
         }
+        if status == "Preparing voice" {
+            return "PREPARING"
+        }
         if isSpeaking {
             return "SPEAKING"
+        }
+        if selectedVoiceProvider == .elevenLabs && !hasElevenLabsAPIKey {
+            return "API KEY"
+        }
+        switch status {
+        case "Reading text":
+            return "READING"
+        case "No text found":
+            return "NO TEXT"
+        case "Starting":
+            return "STARTING"
+        case "Stopped":
+            return "STOPPED"
+        default:
+            break
         }
         return "READY"
     }
@@ -593,6 +807,18 @@ enum GallaxyBrand {
 
 struct GallaxyTTSWidgetView: View {
     @ObservedObject var viewModel: GallaxyTTSWidgetViewModel
+    @State private var leftDrawerMotionOffset: CGFloat = 0
+    @State private var rightDrawerMotionOffset: CGFloat = 0
+    @State private var leftDrawerAnimating = false
+    @State private var rightDrawerAnimating = false
+
+    private let drawerAnimation = Animation.timingCurve(
+        0.22,
+        0.86,
+        0.24,
+        1.0,
+        duration: GallaxyTTSWidgetViewModel.drawerAnimationDuration
+    )
 
     var body: some View {
         GeometryReader { geometry in
@@ -610,96 +836,240 @@ struct GallaxyTTSWidgetView: View {
     }
 
     private var widgetBody: some View {
-        HStack(alignment: .center, spacing: -GallaxyTTSWidgetViewModel.interSectionOverlap) {
-            SideSpeakerRack(
-                side: .left,
-                expanded: viewModel.leftDrawerExpanded,
-                speakerLevel: viewModel.speakerLevel,
-                panelLabel: "Voice Model Panel",
-                toggleAction: viewModel.toggleLeftDrawer
-            )
-                .frame(
-                    width: GallaxyTTSWidgetViewModel.sideSpeakerWidth,
-                    height: GallaxyTTSWidgetViewModel.drawerPanelHeight
-                )
-                .zIndex(0)
+        let leftDelta = viewModel.leftDrawerExpanded ? GallaxyTTSWidgetViewModel.drawerWidthDelta : 0
+        let rightDelta = viewModel.rightDrawerExpanded ? GallaxyTTSWidgetViewModel.drawerWidthDelta : 0
+        let mainX = GallaxyTTSWidgetViewModel.sideSpeakerWidth
+            - GallaxyTTSWidgetViewModel.interSectionOverlap
+            + leftDelta
+        let mainY = (GallaxyTTSWidgetViewModel.widgetHeight - CGFloat(330)) / 2
+        let drawerY = (GallaxyTTSWidgetViewModel.widgetHeight - GallaxyTTSWidgetViewModel.drawerPanelHeight) / 2
+        let leftSpeakerX = GallaxyTTSWidgetViewModel.sideSpeakerWidth / 2
+        let rightSpeakerX = mainX
+            + GallaxyTTSWidgetViewModel.mainDeckWidth
+            - GallaxyTTSWidgetViewModel.interSectionOverlap
+            + rightDelta
+            + GallaxyTTSWidgetViewModel.sideSpeakerWidth / 2
+        let leftDrawerX = mainX
+            + GallaxyTTSWidgetViewModel.interSectionOverlap
+            - GallaxyTTSWidgetViewModel.drawerPanelWidth
+        let rightDrawerX = mainX
+            + GallaxyTTSWidgetViewModel.mainDeckWidth
+            - GallaxyTTSWidgetViewModel.interSectionOverlap
+        let leftSpeakerMinX = leftSpeakerX - GallaxyTTSWidgetViewModel.sideSpeakerWidth / 2
+        let rightSpeakerMinX = rightSpeakerX - GallaxyTTSWidgetViewModel.sideSpeakerWidth / 2
 
-            if viewModel.leftDrawerExpanded {
+        return ZStack(alignment: .topLeading) {
+            ZStack(alignment: .topLeading) {
                 VoiceProviderPanel(viewModel: viewModel)
                     .frame(
                         width: GallaxyTTSWidgetViewModel.drawerPanelWidth,
                         height: GallaxyTTSWidgetViewModel.drawerPanelHeight
                     )
-                    .transition(.asymmetric(
-                        insertion: .move(edge: .leading).combined(with: .opacity),
-                        removal: .move(edge: .leading).combined(with: .opacity)
-                    ))
+                    .offset(
+                        x: leftDrawerX + (viewModel.leftDrawerExpanded ? 0 : GallaxyTTSWidgetViewModel.drawerWidthDelta),
+                        y: drawerY
+                    )
+                    .allowsHitTesting(viewModel.leftDrawerExpanded && !leftDrawerAnimating)
                     .zIndex(1)
+
+                DrawerSpeakerJoinSeal(side: .left)
+                    .frame(
+                        width: GallaxyTTSWidgetViewModel.interSectionOverlap + 2,
+                        height: GallaxyTTSWidgetViewModel.drawerPanelHeight
+                    )
+                    .offset(
+                        x: leftSpeakerMinX + GallaxyTTSWidgetViewModel.sideSpeakerWidth - GallaxyTTSWidgetViewModel.interSectionOverlap - 1,
+                        y: drawerY
+                    )
+                    .opacity(viewModel.leftDrawerExpanded ? 1 : 0)
+                    .zIndex(1.5)
+
+                SideSpeakerRack(
+                    side: .left,
+                    expanded: viewModel.leftDrawerExpanded,
+                    speakerLevel: viewModel.speakerLevel,
+                    panelLabel: "Voice Model Panel",
+                    toggleAction: toggleLeftDrawer
+                )
+                .frame(
+                    width: GallaxyTTSWidgetViewModel.sideSpeakerWidth,
+                    height: GallaxyTTSWidgetViewModel.drawerPanelHeight
+                )
+                .position(
+                    x: leftSpeakerX,
+                    y: drawerY + GallaxyTTSWidgetViewModel.drawerPanelHeight / 2
+                )
+                .zIndex(2)
             }
+            .offset(x: leftDrawerMotionOffset)
+            .zIndex(2)
 
-            ZStack {
-                RetroShell()
+            mainDeck
+                .offset(x: mainX, y: mainY)
+                .zIndex(3)
+                .transaction { transaction in
+                    transaction.animation = nil
+                }
+                .animation(nil, value: viewModel.leftDrawerExpanded)
+                .animation(nil, value: viewModel.rightDrawerExpanded)
 
-                VStack(spacing: 12) {
-                    ZStack {
-                        RoundedRectangle(cornerRadius: 10)
-                            .fill(GallaxyBrand.pageBackground)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 10)
-                                    .stroke(GallaxyBrand.borderSubtle, lineWidth: 1)
-                            )
-                            .shadow(color: .black.opacity(0.75), radius: 4, x: 0, y: 2)
+            ZStack(alignment: .topLeading) {
+                SlideoutRackPanel(viewModel: viewModel)
+                    .frame(
+                        width: GallaxyTTSWidgetViewModel.drawerPanelWidth,
+                        height: GallaxyTTSWidgetViewModel.drawerPanelHeight
+                    )
+                    .offset(
+                        x: rightDrawerX - (viewModel.rightDrawerExpanded ? 0 : GallaxyTTSWidgetViewModel.drawerWidthDelta),
+                        y: drawerY
+                    )
+                    .allowsHitTesting(viewModel.rightDrawerExpanded && !rightDrawerAnimating)
+                    .zIndex(1)
 
-                        VStack(alignment: .leading, spacing: 7) {
-                            HStack {
-                                Text(viewModel.activityLabel)
-                                    .font(GallaxyBrand.displayFont(size: 10, weight: .bold))
-                                    .foregroundStyle(GallaxyBrand.brandMaroonReadable)
-                                Spacer()
-                                Text(String(format: "%.2fx", viewModel.speed))
-                                    .font(GallaxyBrand.displayFont(size: 10, weight: .semibold))
-                                    .foregroundStyle(GallaxyBrand.textMuted)
-                            }
+                DrawerSpeakerJoinSeal(side: .right)
+                    .frame(
+                        width: GallaxyTTSWidgetViewModel.interSectionOverlap + 2,
+                        height: GallaxyTTSWidgetViewModel.drawerPanelHeight
+                    )
+                    .offset(
+                        x: rightSpeakerMinX - 1,
+                        y: drawerY
+                    )
+                    .opacity(viewModel.rightDrawerExpanded ? 1 : 0)
+                    .zIndex(1.5)
 
-                            TerminalConsoleView(
-                                lines: viewModel.consoleLines,
-                                active: viewModel.isSpeaking,
-                                paused: viewModel.isPaused
-                            )
-                                .frame(height: 112)
+                SideSpeakerRack(
+                    side: .right,
+                    expanded: viewModel.rightDrawerExpanded,
+                    speakerLevel: viewModel.speakerLevel,
+                    panelLabel: "Side Panel",
+                    toggleAction: toggleRightDrawer
+                )
+                .frame(
+                    width: GallaxyTTSWidgetViewModel.sideSpeakerWidth,
+                    height: GallaxyTTSWidgetViewModel.drawerPanelHeight
+                )
+                .position(
+                    x: rightSpeakerX,
+                    y: drawerY + GallaxyTTSWidgetViewModel.drawerPanelHeight / 2
+                )
+                .zIndex(2)
+            }
+            .offset(x: rightDrawerMotionOffset)
+            .zIndex(2)
+        }
+        .frame(width: viewModel.widgetWidth, height: GallaxyTTSWidgetViewModel.widgetHeight, alignment: .leading)
+    }
 
-                            Text(viewModel.status)
-                                .font(GallaxyBrand.bodyFont(size: 10, weight: .medium))
-                                .foregroundStyle(GallaxyBrand.textMuted)
-                                .lineLimit(1)
+    private func toggleLeftDrawer() {
+        guard !leftDrawerAnimating else { return }
+        leftDrawerAnimating = true
+
+        if viewModel.leftDrawerExpanded {
+            withAnimation(drawerAnimation) {
+                leftDrawerMotionOffset = GallaxyTTSWidgetViewModel.drawerWidthDelta
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + GallaxyTTSWidgetViewModel.drawerAnimationDuration) {
+                withTransaction(Transaction(animation: nil)) {
+                    viewModel.setLeftDrawerExpanded(false)
+                    leftDrawerMotionOffset = 0
+                    leftDrawerAnimating = false
+                }
+            }
+        } else {
+            withTransaction(Transaction(animation: nil)) {
+                viewModel.setLeftDrawerExpanded(true)
+                leftDrawerMotionOffset = GallaxyTTSWidgetViewModel.drawerWidthDelta
+            }
+            DispatchQueue.main.async {
+                withAnimation(drawerAnimation) {
+                    leftDrawerMotionOffset = 0
+                }
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + GallaxyTTSWidgetViewModel.drawerAnimationDuration) {
+                withTransaction(Transaction(animation: nil)) {
+                    leftDrawerAnimating = false
+                }
+            }
+        }
+    }
+
+    private func toggleRightDrawer() {
+        guard !rightDrawerAnimating else { return }
+        rightDrawerAnimating = true
+
+        if viewModel.rightDrawerExpanded {
+            withAnimation(drawerAnimation) {
+                rightDrawerMotionOffset = -GallaxyTTSWidgetViewModel.drawerWidthDelta
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + GallaxyTTSWidgetViewModel.drawerAnimationDuration) {
+                withTransaction(Transaction(animation: nil)) {
+                    viewModel.setRightDrawerExpanded(false)
+                    rightDrawerMotionOffset = 0
+                    rightDrawerAnimating = false
+                }
+            }
+        } else {
+            withTransaction(Transaction(animation: nil)) {
+                viewModel.setRightDrawerExpanded(true)
+                rightDrawerMotionOffset = -GallaxyTTSWidgetViewModel.drawerWidthDelta
+            }
+            DispatchQueue.main.async {
+                withAnimation(drawerAnimation) {
+                    rightDrawerMotionOffset = 0
+                }
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + GallaxyTTSWidgetViewModel.drawerAnimationDuration) {
+                withTransaction(Transaction(animation: nil)) {
+                    rightDrawerAnimating = false
+                }
+            }
+        }
+    }
+
+    private var mainDeck: some View {
+        ZStack {
+            RetroShell()
+
+            VStack(spacing: 12) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 10)
+                        .fill(GallaxyBrand.pageBackground)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 10)
+                                .stroke(GallaxyBrand.borderSubtle, lineWidth: 1)
+                        )
+                        .shadow(color: .black.opacity(0.75), radius: 4, x: 0, y: 2)
+
+                    VStack(alignment: .leading, spacing: 7) {
+                        HStack {
+                            Text(viewModel.activityLabel)
+                                .font(GallaxyBrand.displayFont(size: 10, weight: .bold))
+                                .foregroundStyle(GallaxyBrand.brandMaroonReadable)
+                            Spacer()
                         }
-                        .padding(10)
+
+                        TerminalConsoleView(
+                            lines: viewModel.consoleLines,
+                            active: viewModel.isSpeaking,
+                            paused: viewModel.isPaused
+                        )
+                            .frame(height: 196)
                     }
-                    .frame(minWidth: 230, minHeight: 184)
+                    .padding(10)
+                }
+                .frame(minWidth: 230, minHeight: 236)
 
+                GallaxyGlassContainer(spacing: 12) {
                     HStack(alignment: .center, spacing: 12) {
-                        Button {
-                            viewModel.play()
-                        } label: {
-                            Image(systemName: "play.fill")
-                                .font(.system(size: 24, weight: .black))
-                                .frame(width: 48, height: 48)
-                        }
-                        .buttonStyle(RetroRoundButtonStyle())
-                        .keyboardShortcut(.return, modifiers: [])
-                        .accessibilityLabel("Play")
+                        GallaxyPlayButton(action: viewModel.play)
 
-                        Button {
-                            viewModel.stop()
-                        } label: {
-                            Image(systemName: "stop.fill")
-                                .font(.system(size: 16, weight: .black))
-                                .frame(width: 38, height: 38)
-                        }
-                        .buttonStyle(RetroStopButtonStyle(active: viewModel.isPaused))
-                        .accessibilityLabel("Stop")
+                        GallaxyStopButton(
+                            active: viewModel.isPaused,
+                            action: viewModel.stop
+                        )
 
-                        RetroSpeedSlider(
+                        GallaxySpeedControl(
                             value: Binding(
                                 get: { viewModel.speed },
                                 set: { newValue in
@@ -716,59 +1086,26 @@ struct GallaxyTTSWidgetView: View {
                             .foregroundStyle(GallaxyBrand.textMuted)
                             .frame(width: 44, alignment: .trailing)
 
-                        Button {
-                            viewModel.setPinned(!viewModel.isPinned)
-                        } label: {
-                            Image(systemName: viewModel.isPinned ? "pin.fill" : "pin")
-                                .font(.system(size: 12, weight: .bold))
-                                .frame(width: 24, height: 24)
-                        }
-                        .buttonStyle(RetroPinButtonStyle(active: viewModel.isPinned))
-                        .accessibilityLabel(viewModel.isPinned ? "Unpin Window" : "Pin Window")
+                        GallaxyPinButton(
+                            active: viewModel.isPinned,
+                            action: { viewModel.setPinned(!viewModel.isPinned) }
+                        )
                         .help(viewModel.isPinned ? "Unpin widget" : "Pin widget above other windows")
                     }
-                    .padding(.top, 2)
                 }
-                .padding(18)
+                .padding(.top, 2)
             }
-            .frame(width: GallaxyTTSWidgetViewModel.mainDeckWidth, height: 330)
-            .zIndex(3)
-
-            if viewModel.rightDrawerExpanded {
-                SlideoutRackPanel(viewModel: viewModel)
-                    .frame(
-                        width: GallaxyTTSWidgetViewModel.drawerPanelWidth,
-                        height: GallaxyTTSWidgetViewModel.drawerPanelHeight
-                    )
-                    .transition(.asymmetric(
-                        insertion: .move(edge: .trailing).combined(with: .opacity),
-                        removal: .move(edge: .trailing).combined(with: .opacity)
-                    ))
-                    .zIndex(1)
-            }
-
-            SideSpeakerRack(
-                side: .right,
-                expanded: viewModel.rightDrawerExpanded,
-                speakerLevel: viewModel.speakerLevel,
-                panelLabel: "Side Panel",
-                toggleAction: viewModel.toggleRightDrawer
-            )
-            .frame(
-                width: GallaxyTTSWidgetViewModel.sideSpeakerWidth,
-                height: GallaxyTTSWidgetViewModel.drawerPanelHeight
-            )
-            .zIndex(0)
+            .padding(14)
         }
-        .frame(width: viewModel.widgetWidth, height: GallaxyTTSWidgetViewModel.widgetHeight, alignment: .leading)
-        .animation(.spring(response: 0.34, dampingFraction: 0.84), value: viewModel.leftDrawerExpanded)
-        .animation(.spring(response: 0.34, dampingFraction: 0.84), value: viewModel.rightDrawerExpanded)
+        .frame(width: GallaxyTTSWidgetViewModel.mainDeckWidth, height: 330)
     }
 
     private func widgetScale(for size: CGSize) -> CGFloat {
         let widthScale = size.width / max(1, viewModel.widgetWidth)
         let heightScale = size.height / GallaxyTTSWidgetViewModel.widgetHeight
-        return GallaxyTTSWidgetViewModel.clampedWidgetScale(min(widthScale, heightScale))
+        let rawScale = GallaxyTTSWidgetViewModel.clampedWidgetScale(min(widthScale, heightScale))
+        let snappedScale = (rawScale * 20).rounded(.toNearestOrAwayFromZero) / 20
+        return GallaxyTTSWidgetViewModel.clampedWidgetScale(snappedScale)
     }
 }
 
@@ -806,9 +1143,208 @@ struct RetroShell: View {
     }
 }
 
+struct GallaxyGlassContainer<Content: View>: View {
+    let spacing: CGFloat?
+    private let content: () -> Content
+
+    init(spacing: CGFloat? = nil, @ViewBuilder content: @escaping () -> Content) {
+        self.spacing = spacing
+        self.content = content
+    }
+
+    var body: some View {
+        if #available(macOS 26.0, *) {
+            GlassEffectContainer(spacing: spacing) {
+                content()
+            }
+        } else {
+            content()
+        }
+    }
+}
+
+enum GallaxyDrawerGlassDirection {
+    case voice
+    case rack
+}
+
+struct GallaxyDrawerGlassBackground: View {
+    let direction: GallaxyDrawerGlassDirection
+
+    var body: some View {
+        drawerSurface
+            .padding(bleedInsets)
+    }
+
+    @ViewBuilder
+    private var drawerSurface: some View {
+        let shape = GallaxyDrawerColumnShape(direction: direction, radius: 8)
+
+        if #available(macOS 26.0, *) {
+            shape
+                .fill(GallaxyBrand.pageBackground.opacity(0.52))
+                .overlay(
+                    shape.fill(glassGradient)
+                )
+                .overlay(
+                    shape
+                        .fill(
+                            .regularMaterial
+                        )
+                        .opacity(0.06)
+                )
+                .overlay(
+                    shape
+                        .fill(
+                            LinearGradient(
+                                colors: [
+                                    GallaxyBrand.textMain.opacity(0.10),
+                                    .clear,
+                                    GallaxyBrand.brandGreen.opacity(0.08)
+                                ],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                )
+                .overlay(
+                    shape.stroke(GallaxyBrand.textMain.opacity(0.22), lineWidth: 1)
+                )
+        } else {
+            shape
+                .fill(GallaxyBrand.pageBackground.opacity(0.60))
+                .overlay(
+                    shape.fill(glassGradient)
+                )
+                .overlay(
+                    shape.stroke(GallaxyBrand.textMain.opacity(0.24), lineWidth: 1)
+                )
+        }
+    }
+
+    private var bleedInsets: EdgeInsets {
+        switch direction {
+        case .voice:
+            return EdgeInsets(top: 0, leading: -24, bottom: 0, trailing: 0)
+        case .rack:
+            return EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: -24)
+        }
+    }
+
+    private var glassGradient: LinearGradient {
+        switch direction {
+        case .voice:
+            return LinearGradient(
+                colors: [
+                    GallaxyBrand.pageBackground.opacity(0.98),
+                    GallaxyBrand.brandMaroon.opacity(0.91),
+                    GallaxyBrand.brandGreen.opacity(0.88)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+        case .rack:
+            return LinearGradient(
+                colors: [
+                    GallaxyBrand.brandGreen.opacity(0.88),
+                    GallaxyBrand.brandMaroon.opacity(0.91),
+                    GallaxyBrand.pageBackground.opacity(0.98)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+        }
+    }
+}
+
+struct GallaxyDrawerColumnShape: Shape {
+    let direction: GallaxyDrawerGlassDirection
+    var radius: CGFloat
+
+    func path(in rect: CGRect) -> Path {
+        let radius = min(radius, rect.width / 2, rect.height / 2)
+        let c = radius * 0.5522847498
+        var path = Path()
+
+        switch direction {
+        case .voice:
+            path.move(to: CGPoint(x: rect.maxX, y: rect.minY))
+            path.addLine(to: CGPoint(x: rect.minX + radius, y: rect.minY))
+            path.addCurve(
+                to: CGPoint(x: rect.minX, y: rect.minY + radius),
+                control1: CGPoint(x: rect.minX + radius - c, y: rect.minY),
+                control2: CGPoint(x: rect.minX, y: rect.minY + radius - c)
+            )
+            path.addLine(to: CGPoint(x: rect.minX, y: rect.maxY - radius))
+            path.addCurve(
+                to: CGPoint(x: rect.minX + radius, y: rect.maxY),
+                control1: CGPoint(x: rect.minX, y: rect.maxY - radius + c),
+                control2: CGPoint(x: rect.minX + radius - c, y: rect.maxY)
+            )
+            path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
+            path.addLine(to: CGPoint(x: rect.maxX, y: rect.minY))
+
+        case .rack:
+            path.move(to: CGPoint(x: rect.minX, y: rect.minY))
+            path.addLine(to: CGPoint(x: rect.maxX - radius, y: rect.minY))
+            path.addCurve(
+                to: CGPoint(x: rect.maxX, y: rect.minY + radius),
+                control1: CGPoint(x: rect.maxX - radius + c, y: rect.minY),
+                control2: CGPoint(x: rect.maxX, y: rect.minY + radius - c)
+            )
+            path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY - radius))
+            path.addCurve(
+                to: CGPoint(x: rect.maxX - radius, y: rect.maxY),
+                control1: CGPoint(x: rect.maxX, y: rect.maxY - radius + c),
+                control2: CGPoint(x: rect.maxX - radius + c, y: rect.maxY)
+            )
+            path.addLine(to: CGPoint(x: rect.minX, y: rect.maxY))
+            path.addLine(to: CGPoint(x: rect.minX, y: rect.minY))
+        }
+
+        path.closeSubpath()
+        return path
+    }
+}
+
 enum SpeakerRackSide {
     case left
     case right
+}
+
+struct DrawerSpeakerJoinSeal: View {
+    let side: SpeakerRackSide
+
+    var body: some View {
+        Rectangle()
+            .fill(
+                LinearGradient(
+                    colors: [
+                        GallaxyBrand.textMain.opacity(0.28),
+                        GallaxyBrand.brandMaroonReadable.opacity(0.88),
+                        GallaxyBrand.brandMaroon.opacity(0.95),
+                        GallaxyBrand.pageBackground.opacity(0.86)
+                    ],
+                    startPoint: side == .left ? .topTrailing : .topLeading,
+                    endPoint: side == .left ? .bottomLeading : .bottomTrailing
+                )
+            )
+            .overlay(
+                Rectangle()
+                    .fill(
+                        LinearGradient(
+                            colors: [
+                                .clear,
+                                GallaxyBrand.brandMaroon.opacity(0.22),
+                                .clear
+                            ],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                    )
+            )
+            .accessibilityHidden(true)
+    }
 }
 
 struct SideSpeakerRack: View {
@@ -819,8 +1355,11 @@ struct SideSpeakerRack: View {
     var toggleAction: (() -> Void)?
 
     var body: some View {
+        let wingShape = SpeakerWingShape(side: side, verticalInsetFraction: 0.0, bottomExtension: 3)
+        let rimShape = SpeakerWingRimShape(side: side, verticalInsetFraction: 0.0, bottomExtension: 3)
+
         ZStack {
-            SpeakerWingShape(side: side, verticalInsetFraction: 0.0)
+            wingShape
                 .fill(
                     LinearGradient(
                     colors: [
@@ -834,7 +1373,7 @@ struct SideSpeakerRack: View {
                     )
                 )
                 .overlay(
-                    SpeakerWingShape(side: side, verticalInsetFraction: 0.0)
+                    rimShape
                         .stroke(
                             LinearGradient(
                                 colors: [
@@ -847,12 +1386,7 @@ struct SideSpeakerRack: View {
                             ),
                             lineWidth: 2
                         )
-                )
-                .shadow(
-                    color: GallaxyBrand.brandMaroonReadable.opacity(0.144 + min(0.288, speakerLevel * 0.288)),
-                    radius: 6 + (speakerLevel * 8.4),
-                    x: 0,
-                    y: 1
+                        .clipShape(wingShape)
                 )
 
             VStack(spacing: 10) {
@@ -896,32 +1430,16 @@ struct VoiceProviderPanel: View {
 
     var body: some View {
         ZStack {
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(
-                    LinearGradient(
-                        colors: [
-                            GallaxyBrand.pageBackground.opacity(0.96),
-                            GallaxyBrand.brandMaroon.opacity(0.82),
-                            GallaxyBrand.brandGreen.opacity(0.78)
-                        ],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .stroke(GallaxyBrand.textMain.opacity(0.24), lineWidth: 1)
-                )
-                .shadow(color: .black.opacity(0.45), radius: 5, x: 0, y: 2)
+            GallaxyDrawerGlassBackground(direction: .voice)
 
             VStack(alignment: .leading, spacing: 8) {
                 Text("VOICE SOURCE")
-                    .font(GallaxyBrand.displayFont(size: 10, weight: .bold))
-                    .foregroundStyle(GallaxyBrand.textMain.opacity(0.86))
+                    .font(GallaxyBrand.displayFont(size: 11.4, weight: .bold))
+                    .foregroundStyle(GallaxyBrand.textMain.opacity(0.96))
 
-                Text("SELECT MODEL")
-                    .font(.system(size: 9, weight: .bold, design: .monospaced))
-                    .foregroundStyle(GallaxyBrand.brandMaroonReadable)
+                Text("SELECT SOURCE")
+                    .font(GallaxyBrand.displayFont(size: 9.8, weight: .bold))
+                    .foregroundStyle(GallaxyBrand.brandMaroonReadable.opacity(0.96))
 
                 VStack(spacing: 5) {
                     ForEach(VoiceProviderOption.allCases) { provider in
@@ -936,10 +1454,10 @@ struct VoiceProviderPanel: View {
 
                                 VStack(alignment: .leading, spacing: 1) {
                                     Text(provider.title)
-                                        .font(.system(size: 9, weight: .bold, design: .monospaced))
+                                        .font(GallaxyBrand.displayFont(size: 10.9, weight: .bold))
                                     Text(provider.detail)
-                                        .font(.system(size: 8, weight: .medium, design: .monospaced))
-                                        .opacity(0.68)
+                                        .font(GallaxyBrand.bodyFont(size: 9.4, weight: .semibold))
+                                        .foregroundStyle(GallaxyBrand.textMain.opacity(0.82))
                                 }
                                 Spacer(minLength: 0)
                             }
@@ -959,10 +1477,10 @@ struct VoiceProviderPanel: View {
                 Spacer(minLength: 0)
 
                 Text(providerStatus)
-                    .font(.system(size: 8, weight: .bold, design: .monospaced))
-                    .foregroundStyle(GallaxyBrand.textMuted)
+                    .font(GallaxyBrand.displayFont(size: 9.2, weight: .bold))
+                    .foregroundStyle(GallaxyBrand.textMain.opacity(0.80))
             }
-            .padding(12)
+            .padding(EdgeInsets(top: 12, leading: 34, bottom: 12, trailing: 34))
         }
     }
 
@@ -970,7 +1488,7 @@ struct VoiceProviderPanel: View {
         if viewModel.selectedVoiceProvider == .elevenLabs {
             return viewModel.hasElevenLabsAPIKey ? "ELEVENLABS READY" : "API KEY NEEDED"
         }
-        return "ROUTER READY"
+        return "KOKORO LOCAL"
     }
 }
 
@@ -984,18 +1502,18 @@ struct ElevenLabsCredentialPanel: View {
 
             HStack {
                 Text(viewModel.hasElevenLabsAPIKey ? "API KEY SAVED" : "API KEY")
-                    .font(.system(size: 8, weight: .bold, design: .monospaced))
-                    .foregroundStyle(GallaxyBrand.textMuted)
+                    .font(GallaxyBrand.displayFont(size: 9.2, weight: .bold))
+                    .foregroundStyle(GallaxyBrand.textMain.opacity(0.80))
                 Spacer()
                 if viewModel.credentialMessage.isEmpty == false {
                     Text(viewModel.credentialMessage)
-                        .font(.system(size: 7, weight: .bold, design: .monospaced))
+                        .font(GallaxyBrand.displayFont(size: 8.4, weight: .bold))
                         .foregroundStyle(GallaxyBrand.brandMaroonReadable)
                 }
             }
 
             SecureField("xi-api-key", text: $viewModel.elevenLabsAPIKeyDraft)
-                .font(.system(size: 9, weight: .medium, design: .monospaced))
+                .font(GallaxyBrand.bodyFont(size: 9.8, weight: .medium))
                 .textFieldStyle(.plain)
                 .foregroundStyle(GallaxyBrand.textMain)
                 .padding(.horizontal, 8)
@@ -1043,14 +1561,11 @@ struct VoiceProviderButtonStyle: ButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .foregroundStyle(active ? GallaxyBrand.textMain : GallaxyBrand.textMain.opacity(0.72))
-            .background(
-                RoundedRectangle(cornerRadius: 5, style: .continuous)
-                    .fill(active ? GallaxyBrand.brandMaroonReadable.opacity(0.28) : GallaxyBrand.pageBackground.opacity(configuration.isPressed ? 0.36 : 0.18))
-            )
+            .foregroundStyle(active ? GallaxyBrand.textMain : GallaxyBrand.textMain.opacity(0.88))
+            .background(GlassRowButtonBackground(active: active, pressed: configuration.isPressed))
             .overlay(
                 RoundedRectangle(cornerRadius: 5, style: .continuous)
-                    .stroke(active ? GallaxyBrand.textMain.opacity(0.22) : GallaxyBrand.borderSubtle, lineWidth: 1)
+                    .stroke(active ? GallaxyBrand.textMain.opacity(0.34) : GallaxyBrand.textMain.opacity(0.20), lineWidth: 1)
             )
     }
 }
@@ -1060,10 +1575,7 @@ struct PanelCommandButtonStyle: ButtonStyle {
         configuration.label
             .foregroundStyle(GallaxyBrand.textMain.opacity(configuration.isPressed ? 0.72 : 0.88))
             .padding(.vertical, 5)
-            .background(
-                RoundedRectangle(cornerRadius: 5, style: .continuous)
-                    .fill(configuration.isPressed ? GallaxyBrand.brandMaroon.opacity(0.74) : GallaxyBrand.pageBackground.opacity(0.36))
-            )
+            .background(GlassCommandButtonBackground(pressed: configuration.isPressed))
             .overlay(
                 RoundedRectangle(cornerRadius: 5, style: .continuous)
                     .stroke(GallaxyBrand.textMain.opacity(0.16), lineWidth: 1)
@@ -1075,78 +1587,139 @@ struct PanelCommandButtonStyle: ButtonStyle {
 struct SlideoutRackPanel: View {
     @ObservedObject var viewModel: GallaxyTTSWidgetViewModel
 
-    private let bands: [CGFloat] = [0.38, 0.58, 0.46, 0.78, 0.50, 0.67, 0.42]
-
     var body: some View {
         ZStack {
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(
-                    LinearGradient(
-                        colors: [
-                            GallaxyBrand.brandGreen.opacity(0.88),
-                            GallaxyBrand.brandMaroon.opacity(0.82),
-                            GallaxyBrand.pageBackground.opacity(0.96)
-                        ],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .stroke(GallaxyBrand.textMain.opacity(0.24), lineWidth: 1)
-                )
-                .shadow(color: .black.opacity(0.45), radius: 5, x: 0, y: 2)
+            GallaxyDrawerGlassBackground(direction: .rack)
 
-            VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: 6) {
                 HStack {
-                    Text("VOICE RACK")
-                        .font(GallaxyBrand.displayFont(size: 10, weight: .bold))
-                        .foregroundStyle(GallaxyBrand.textMain.opacity(0.86))
+                    Text("CLIP TRAY")
+                        .font(GallaxyBrand.displayFont(size: 11.4, weight: .bold))
+                        .foregroundStyle(GallaxyBrand.textMain.opacity(0.96))
                     Spacer()
-                    Text(viewModel.activityLabel)
-                        .font(.system(size: 9, weight: .bold, design: .monospaced))
-                        .foregroundStyle(GallaxyBrand.brandMaroonReadable)
+                    Text("\(viewModel.recentClipboardClips.count + (viewModel.currentClipboardClip == nil ? 0 : 1))")
+                        .font(GallaxyBrand.displayFont(size: 9.8, weight: .bold))
+                        .foregroundStyle(GallaxyBrand.brandMaroonReadable.opacity(0.96))
                 }
 
-                HStack(alignment: .bottom, spacing: 9) {
-                    ForEach(Array(bands.enumerated()), id: \.offset) { index, height in
-                        VStack(spacing: 5) {
-                            Capsule()
-                                .fill(GallaxyBrand.pageBackground.opacity(0.76))
-                                .frame(width: 5, height: 62)
-                                .overlay(alignment: .bottom) {
-                                    Capsule()
-                                        .fill(GallaxyBrand.textMain.opacity(0.78))
-                                        .frame(width: 5, height: 62 * height)
-                                }
-                            Text("\((index + 1) * 2)")
-                                .font(.system(size: 6.5, weight: .medium, design: .monospaced))
-                                .foregroundStyle(GallaxyBrand.textMuted)
-                        }
-                    }
+                Text("CURRENT CLIP")
+                    .font(GallaxyBrand.displayFont(size: 8.8, weight: .bold))
+                    .foregroundStyle(GallaxyBrand.brandMaroonReadable.opacity(0.96))
+
+                if let currentClip = viewModel.currentClipboardClip {
+                    ClipTrayRow(
+                        clip: currentClip,
+                        badge: "NOW",
+                        compact: false,
+                        action: { viewModel.speakClip(currentClip) }
+                    )
+                    .frame(height: 54)
+                } else {
+                    ClipTrayEmptyRow(text: "clipboard empty")
+                        .frame(height: 54)
                 }
-                .frame(maxWidth: .infinity)
 
                 Divider()
                     .overlay(GallaxyBrand.borderSubtle)
 
-                VStack(alignment: .leading, spacing: 5) {
-                    Text(String(format: "SPEED %.2fx", viewModel.speed))
-                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(GallaxyBrand.textMain.opacity(0.78))
-                    Text(lastConsoleLine)
-                        .font(.system(size: 9, weight: .medium, design: .monospaced))
-                        .foregroundStyle(GallaxyBrand.textMuted)
-                        .lineLimit(3)
-                        .truncationMode(.tail)
+                Text("RECENT CLIPS")
+                    .font(GallaxyBrand.displayFont(size: 8.8, weight: .bold))
+                    .foregroundStyle(GallaxyBrand.textMain.opacity(0.78))
+
+                let clips = viewModel.recentClipboardClips
+                ScrollView(.vertical, showsIndicators: clips.count > 3) {
+                    VStack(spacing: 5) {
+                        if clips.isEmpty {
+                            ClipTrayEmptyRow(text: "no recent clips")
+                                .frame(height: 34)
+                        } else {
+                            ForEach(clips) { clip in
+                                ClipTrayRow(
+                                    clip: clip,
+                                    badge: clip.source.uppercased().prefix(4).description,
+                                    compact: true,
+                                    action: { viewModel.speakClip(clip) }
+                                )
+                                .frame(height: 34)
+                            }
+                        }
+                    }
+                    .padding(.trailing, clips.count > 3 ? 5 : 0)
                 }
+                .frame(height: 116)
+                .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
             }
-            .padding(12)
+            .padding(EdgeInsets(top: 12, leading: 34, bottom: 12, trailing: 34))
         }
     }
+}
 
-    private var lastConsoleLine: String {
-        viewModel.consoleLines.last ?? "> ready"
+struct ClipTrayRow: View {
+    let clip: ClipboardClip
+    let badge: String
+    let compact: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(alignment: .leading, spacing: compact ? 2 : 4) {
+                HStack(spacing: 5) {
+                    Text(badge)
+                        .font(GallaxyBrand.displayFont(size: compact ? 7.3 : 7.8, weight: .bold))
+                        .foregroundStyle(GallaxyBrand.brandMaroonReadable.opacity(0.96))
+                        .frame(width: 24, alignment: .leading)
+
+                    Text(clip.title)
+                        .font(GallaxyBrand.displayFont(size: compact ? 8.6 : 9.6, weight: .bold))
+                        .foregroundStyle(GallaxyBrand.textMain.opacity(0.94))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+
+                Text(clip.preview)
+                    .font(GallaxyBrand.bodyFont(size: compact ? 8.2 : 8.8, weight: .semibold))
+                    .foregroundStyle(GallaxyBrand.textMain.opacity(0.76))
+                    .lineLimit(compact ? 1 : 2)
+                    .truncationMode(.tail)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 7)
+            .padding(.vertical, compact ? 4 : 6)
+        }
+        .buttonStyle(ClipTrayButtonStyle(active: !compact))
+        .help(clip.preview)
+    }
+}
+
+struct ClipTrayEmptyRow: View {
+    let text: String
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: 5, style: .continuous)
+            .fill(GallaxyBrand.pageBackground.opacity(0.22))
+            .overlay(
+                Text(text.uppercased())
+                    .font(GallaxyBrand.displayFont(size: 8.2, weight: .bold))
+                    .foregroundStyle(GallaxyBrand.textMain.opacity(0.42))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .stroke(GallaxyBrand.borderSubtle, lineWidth: 1)
+            )
+    }
+}
+
+struct ClipTrayButtonStyle: ButtonStyle {
+    let active: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .background(GlassRowButtonBackground(active: active, pressed: configuration.isPressed))
+            .overlay(
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .stroke(active ? GallaxyBrand.textMain.opacity(0.30) : GallaxyBrand.textMain.opacity(0.16), lineWidth: 1)
+            )
+            .scaleEffect(configuration.isPressed ? 0.985 : 1)
     }
 }
 
@@ -1169,14 +1742,15 @@ struct SpeakerChevronButtonStyle: ButtonStyle {
 struct SpeakerWingShape: Shape {
     let side: SpeakerRackSide
     var verticalInsetFraction: CGFloat = 0.08
+    var bottomExtension: CGFloat = 0
 
     func path(in rect: CGRect) -> Path {
         var path = Path()
 
         let top = rect.minY + rect.height * verticalInsetFraction
-        let bottom = rect.maxY - rect.height * verticalInsetFraction
-        let innerX = rect.minX + rect.width * 0.03
-        let outerX = rect.maxX - rect.width * 0.02
+        let bottom = rect.maxY - rect.height * verticalInsetFraction + bottomExtension
+        let innerX = rect.minX
+        let outerX = rect.maxX
         let shelfX = rect.minX + rect.width * 0.26
 
         path.move(to: CGPoint(x: innerX, y: top))
@@ -1208,6 +1782,45 @@ struct SpeakerWingShape: Shape {
     }
 }
 
+struct SpeakerWingRimShape: Shape {
+    let side: SpeakerRackSide
+    var verticalInsetFraction: CGFloat = 0.08
+    var bottomExtension: CGFloat = 0
+
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+
+        let top = rect.minY + rect.height * verticalInsetFraction
+        let bottom = rect.maxY - rect.height * verticalInsetFraction + bottomExtension
+        let innerX = rect.minX
+        let outerX = rect.maxX
+        let shelfX = rect.minX + rect.width * 0.26
+
+        path.move(to: CGPoint(x: innerX, y: top))
+        path.addLine(to: CGPoint(x: shelfX, y: top))
+        path.addCurve(
+            to: CGPoint(x: outerX, y: rect.midY),
+            control1: CGPoint(x: rect.maxX - rect.width * 0.11, y: top),
+            control2: CGPoint(x: outerX, y: rect.minY + rect.height * 0.28)
+        )
+        path.addCurve(
+            to: CGPoint(x: shelfX, y: bottom),
+            control1: CGPoint(x: outerX, y: rect.maxY - rect.height * 0.28),
+            control2: CGPoint(x: rect.maxX - rect.width * 0.11, y: bottom)
+        )
+        path.addLine(to: CGPoint(x: innerX, y: bottom))
+
+        if side == .left {
+            let mirror = CGAffineTransform(translationX: rect.midX, y: rect.midY)
+                .scaledBy(x: -1, y: 1)
+                .translatedBy(x: -rect.midX, y: -rect.midY)
+            return path.applying(mirror)
+        }
+
+        return path
+    }
+}
+
 struct SpeakerCone: View {
     let size: CGFloat
     var level = 0.0
@@ -1217,73 +1830,112 @@ struct SpeakerCone: View {
     }
 
     var body: some View {
+        let coneScale = 1 + pulse * 0.10
+        let capScale = 1 + pulse * 0.13
+
         ZStack {
             Circle()
                 .fill(
                     RadialGradient(
                         colors: [
-                            GallaxyBrand.textMain.opacity(0.58),
-                            GallaxyBrand.textMain.opacity(0.18),
-                            GallaxyBrand.pageBackground.opacity(0.82)
+                            Color(red: 0.10, green: 0.10, blue: 0.09),
+                            Color(red: 0.02, green: 0.02, blue: 0.02)
                         ],
-                        center: .center,
-                        startRadius: 4,
+                        center: UnitPoint(x: 0.42, y: 0.34),
+                        startRadius: size * 0.20,
                         endRadius: size * 0.55
                     )
                 )
-                .overlay(Circle().stroke(GallaxyBrand.textMain.opacity(0.34), lineWidth: 2))
-                .scaleEffect(1 + pulse * 0.025)
+                .overlay(
+                    Circle()
+                        .stroke(
+                            LinearGradient(
+                                colors: [
+                                    GallaxyBrand.textMain.opacity(0.28),
+                                    .black.opacity(0.92)
+                                ],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            ),
+                            lineWidth: 2.5
+                        )
+                )
+
+            Circle()
+                .fill(Color(red: 0.025, green: 0.024, blue: 0.022))
+                .frame(width: size * 0.84, height: size * 0.84)
+                .shadow(color: .black.opacity(0.66), radius: 2, x: 0, y: 1)
+
+            ForEach(0..<4, id: \.self) { index in
+                Circle()
+                    .fill(
+                        RadialGradient(
+                            colors: [
+                                Color(red: 0.63, green: 0.52, blue: 0.36),
+                                Color(red: 0.08, green: 0.07, blue: 0.06)
+                            ],
+                            center: UnitPoint(x: 0.35, y: 0.32),
+                            startRadius: 0,
+                            endRadius: 3
+                        )
+                    )
+                    .frame(width: size * 0.075, height: size * 0.075)
+                    .offset(y: -(size * 0.43))
+                    .rotationEffect(.degrees(Double(index) * 90 + 45))
+                    .accessibilityHidden(true)
+            }
 
             Circle()
                 .fill(
                     RadialGradient(
                         colors: [
-                            GallaxyBrand.textMain.opacity(0.92),
-                            GallaxyBrand.textMain.opacity(0.34),
-                            GallaxyBrand.brandGreen.opacity(0.38),
-                            GallaxyBrand.pageBackground.opacity(0.92)
+                            Color(red: 0.78, green: 0.62, blue: 0.40),
+                            Color(red: 0.54, green: 0.37, blue: 0.22),
+                            Color(red: 0.19, green: 0.13, blue: 0.09)
                         ],
-                        center: UnitPoint(x: 0.42, y: 0.36),
-                        startRadius: 2,
-                        endRadius: size * 0.38
+                        center: UnitPoint(x: 0.40, y: 0.32),
+                        startRadius: size * 0.04,
+                        endRadius: size * 0.34
                     )
                 )
                 .frame(width: size * 0.68, height: size * 0.68)
-                .overlay(Circle().stroke(.black.opacity(0.38), lineWidth: 1.5))
-                .scaleEffect(1 + pulse * 0.075)
-                .brightness(Double(pulse) * 0.06)
+                .overlay(
+                    Circle()
+                        .stroke(.black.opacity(0.72), lineWidth: 2)
+                )
+                .overlay(
+                    Circle()
+                        .trim(from: 0.05, to: 0.38)
+                        .stroke(GallaxyBrand.textMain.opacity(0.17), style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                        .rotationEffect(.degrees(-18))
+                )
+                .scaleEffect(coneScale)
+                .brightness(Double(pulse) * 0.04)
 
             Circle()
                 .fill(
                     RadialGradient(
                         colors: [
-                            GallaxyBrand.textMain.opacity(0.92),
-                            GallaxyBrand.textMain.opacity(0.28),
-                            GallaxyBrand.pageBackground.opacity(0.74)
+                            Color(red: 0.20, green: 0.22, blue: 0.20),
+                            Color(red: 0.045, green: 0.047, blue: 0.045)
                         ],
-                        center: UnitPoint(x: 0.35, y: 0.32),
-                        startRadius: 1,
+                        center: UnitPoint(x: 0.36, y: 0.30),
+                        startRadius: 0,
                         endRadius: size * 0.18
                     )
                 )
-                .frame(width: size * 0.30, height: size * 0.30)
-                .scaleEffect(1 + pulse * 0.16)
+                .frame(width: size * 0.29, height: size * 0.29)
+                .overlay(
+                    Circle()
+                        .stroke(.black.opacity(0.86), lineWidth: 1.6)
+                )
+                .scaleEffect(capScale)
                 .shadow(
-                    color: GallaxyBrand.textMain.opacity(0.12 + Double(pulse) * 0.30),
-                    radius: 1 + Double(pulse) * 4,
+                    color: GallaxyBrand.brandMaroonReadable.opacity(0.10 + Double(pulse) * 0.22),
+                    radius: 1 + Double(pulse) * 3,
                     x: 0,
                     y: 0
                 )
-
-            Circle()
-                .trim(from: 0.08, to: 0.42)
-                .stroke(
-                    GallaxyBrand.textMain.opacity(0.42 + Double(pulse) * 0.30),
-                    style: StrokeStyle(lineWidth: 2, lineCap: .round)
-                )
-                .frame(width: size * 0.80, height: size * 0.80)
-                .rotationEffect(.degrees(-12))
-                .scaleEffect(1 + pulse * 0.035)
         }
         .frame(width: size, height: size)
         .animation(.linear(duration: 0.035), value: level)
@@ -1296,6 +1948,8 @@ struct TerminalConsoleView: View {
     let paused: Bool
 
     var body: some View {
+        let displayLines = lines.filter { $0 != "GALLAXY TTS CONSOLE" }
+
         ZStack(alignment: .topLeading) {
             RoundedRectangle(cornerRadius: 6)
                 .fill(
@@ -1315,11 +1969,11 @@ struct TerminalConsoleView: View {
                 )
 
             VStack(alignment: .leading, spacing: 5) {
-                ForEach(Array(lines.enumerated()), id: \.offset) { index, line in
+                ForEach(Array(displayLines.enumerated()), id: \.offset) { index, line in
                     Text(line)
-                        .font(.system(size: index == 0 ? 10.0 : 10.5, weight: index == 0 ? .bold : .medium, design: .monospaced))
+                        .font(.system(size: 10.5, weight: .medium, design: .monospaced))
                         .foregroundStyle(foregroundColor(for: index))
-                        .lineLimit(index == lines.count - 1 ? 3 : 1)
+                        .lineLimit(index == displayLines.count - 1 ? 3 : 1)
                         .truncationMode(.tail)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -1337,13 +1991,516 @@ struct TerminalConsoleView: View {
     }
 
     private func foregroundColor(for index: Int) -> Color {
-        if index == 0 {
-            return GallaxyBrand.brandMaroonReadable
-        }
         if paused {
             return GallaxyBrand.textMuted
         }
         return active ? GallaxyBrand.textMain.opacity(0.86) : GallaxyBrand.textMuted
+    }
+}
+
+struct GallaxyHoverGlow: ViewModifier {
+    let radius: CGFloat
+    let scale: CGFloat
+    @State private var hovering = false
+
+    func body(content: Content) -> some View {
+        content
+            .scaleEffect(hovering ? scale : 1)
+            .shadow(
+                color: GallaxyBrand.brandMaroonReadable.opacity(hovering ? 0.46 : 0),
+                radius: hovering ? radius : 0,
+                x: 0,
+                y: hovering ? 2 : 0
+            )
+            .animation(.easeOut(duration: 0.12), value: hovering)
+            .onHover { hovering = $0 }
+    }
+}
+
+extension View {
+    func gallaxyHoverGlow(radius: CGFloat, scale: CGFloat) -> some View {
+        modifier(GallaxyHoverGlow(radius: radius, scale: scale))
+    }
+}
+
+struct GallaxySpeedControl: NSViewRepresentable {
+    @Binding var value: Double
+    let range: ClosedRange<Double>
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(self)
+    }
+
+    func makeNSView(context: Context) -> GallaxySpeedSliderControl {
+        let control = GallaxySpeedSliderControl()
+        control.minimumValue = range.lowerBound
+        control.maximumValue = range.upperBound
+        control.setSpeedValue(value, notify: false)
+        control.target = context.coordinator
+        control.action = #selector(Coordinator.speedChanged(_:))
+        return control
+    }
+
+    func updateNSView(_ nsView: GallaxySpeedSliderControl, context: Context) {
+        context.coordinator.parent = self
+        nsView.minimumValue = range.lowerBound
+        nsView.maximumValue = range.upperBound
+        nsView.setSpeedValue(value, notify: false)
+    }
+
+    final class Coordinator: NSObject {
+        var parent: GallaxySpeedControl
+
+        init(_ parent: GallaxySpeedControl) {
+            self.parent = parent
+        }
+
+        @objc func speedChanged(_ sender: GallaxySpeedSliderControl) {
+            parent.value = sender.speedValue
+        }
+    }
+}
+
+final class GallaxySpeedSliderControl: NSControl {
+    var minimumValue: Double = 0.75 {
+        didSet { setSpeedValue(speedValue, notify: false) }
+    }
+
+    var maximumValue: Double = 1.6 {
+        didSet { setSpeedValue(speedValue, notify: false) }
+    }
+
+    private(set) var speedValue: Double = 1.15
+    private var hovering = false
+    private var dragging = false
+    private var tracking: NSTrackingArea?
+
+    private let knobDiameter: CGFloat = 25
+    private let trackHeight: CGFloat = 16
+
+    override var acceptsFirstResponder: Bool { true }
+    override var intrinsicContentSize: NSSize { NSSize(width: 180, height: 34) }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        setAccessibilityElement(true)
+        setAccessibilityRole(.slider)
+        setAccessibilityLabel("Speed")
+        updateAccessibilityValue()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        wantsLayer = true
+        setAccessibilityElement(true)
+        setAccessibilityRole(.slider)
+        setAccessibilityLabel("Speed")
+        updateAccessibilityValue()
+    }
+
+    func setSpeedValue(_ nextValue: Double, notify: Bool) {
+        let clamped = min(maximumValue, max(minimumValue, nextValue))
+        guard abs(clamped - speedValue) > 0.0001 else {
+            updateAccessibilityValue()
+            return
+        }
+
+        speedValue = clamped
+        needsDisplay = true
+        updateAccessibilityValue()
+
+        if notify, let action {
+            sendAction(action, to: target)
+        }
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let tracking {
+            removeTrackingArea(tracking)
+        }
+
+        let options: NSTrackingArea.Options = [.activeAlways, .mouseEnteredAndExited, .inVisibleRect]
+        let nextTracking = NSTrackingArea(rect: bounds, options: options, owner: self, userInfo: nil)
+        addTrackingArea(nextTracking)
+        tracking = nextTracking
+    }
+
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: .pointingHand)
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        hovering = true
+        needsDisplay = true
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        hovering = false
+        needsDisplay = true
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        window?.makeFirstResponder(self)
+        dragging = true
+        updateValue(with: event)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        updateValue(with: event)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        dragging = false
+        needsDisplay = true
+    }
+
+    override func keyDown(with event: NSEvent) {
+        switch event.specialKey {
+        case .leftArrow, .downArrow:
+            setSpeedValue(speedValue - 0.05, notify: true)
+        case .rightArrow, .upArrow:
+            setSpeedValue(speedValue + 0.05, notify: true)
+        default:
+            super.keyDown(with: event)
+        }
+    }
+
+    override func accessibilityPerformIncrement() -> Bool {
+        setSpeedValue(speedValue + 0.05, notify: true)
+        return true
+    }
+
+    override func accessibilityPerformDecrement() -> Bool {
+        setSpeedValue(speedValue - 0.05, notify: true)
+        return true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+
+        let progress = CGFloat((speedValue - minimumValue) / max(0.001, maximumValue - minimumValue))
+        let knobRadius = knobDiameter / 2
+        let trackRect = NSRect(
+            x: knobRadius,
+            y: bounds.midY - trackHeight / 2,
+            width: max(1, bounds.width - knobDiameter),
+            height: trackHeight
+        )
+        let progressWidth = max(trackHeight, trackRect.width * min(1, max(0, progress)))
+        let progressRect = NSRect(
+            x: trackRect.minX,
+            y: trackRect.minY,
+            width: min(trackRect.width, progressWidth),
+            height: trackRect.height
+        )
+        let knobX = trackRect.minX + trackRect.width * min(1, max(0, progress))
+        let knobRect = NSRect(
+            x: knobX - knobRadius,
+            y: bounds.midY - knobRadius,
+            width: knobDiameter,
+            height: knobDiameter
+        )
+
+        let trackPath = NSBezierPath(roundedRect: trackRect, xRadius: trackHeight / 2, yRadius: trackHeight / 2)
+        NSColor.gallaxyHex(0x070706, alpha: hovering || dragging ? 0.88 : 0.72).setFill()
+        trackPath.fill()
+        NSColor.gallaxyHex(0xe9e3d5, alpha: hovering || dragging ? 0.22 : 0.14).setStroke()
+        trackPath.lineWidth = 1
+        trackPath.stroke()
+
+        NSGraphicsContext.saveGraphicsState()
+        trackPath.addClip()
+        let progressPath = NSBezierPath(roundedRect: progressRect, xRadius: trackHeight / 2, yRadius: trackHeight / 2)
+        let progressGradient = NSGradient(colors: [
+            NSColor.gallaxyHex(0x6b1f26, alpha: 0.96),
+            NSColor.gallaxyHex(0xa63a43, alpha: 0.98),
+            NSColor.gallaxyHex(0xe9e3d5, alpha: 0.72)
+        ])
+        progressGradient?.draw(in: progressPath, angle: 0)
+
+        let shineRect = NSRect(x: trackRect.minX, y: trackRect.midY, width: trackRect.width, height: trackRect.height / 2)
+        NSColor.white.withAlphaComponent(hovering || dragging ? 0.12 : 0.08).setFill()
+        NSBezierPath(roundedRect: shineRect, xRadius: shineRect.height / 2, yRadius: shineRect.height / 2).fill()
+        NSGraphicsContext.restoreGraphicsState()
+
+        let knobPath = NSBezierPath(ovalIn: knobRect)
+        NSShadow.gallaxy(color: .black.withAlphaComponent(0.48), blur: dragging ? 5 : 4, y: dragging ? 2 : 3) {
+            NSGradient(colors: [
+                NSColor.gallaxyHex(0xe9e3d5, alpha: 0.98),
+                NSColor.gallaxyHex(0xbeb6a7, alpha: 0.95),
+                NSColor.gallaxyHex(0x566b57, alpha: 0.58)
+            ])?.draw(in: knobPath, angle: -90)
+        }
+
+        NSColor.gallaxyHex(0xe9e3d5, alpha: dragging ? 0.58 : 0.34).setStroke()
+        knobPath.lineWidth = dragging ? 2 : 1.4
+        knobPath.stroke()
+    }
+
+    private func updateValue(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        let knobRadius = knobDiameter / 2
+        let usableWidth = max(1, bounds.width - knobDiameter)
+        let progress = min(1, max(0, (point.x - knobRadius) / usableWidth))
+        let nextValue = minimumValue + Double(progress) * (maximumValue - minimumValue)
+        setSpeedValue(nextValue, notify: true)
+    }
+
+    private func updateAccessibilityValue() {
+        setAccessibilityValue(String(format: "%.2fx", speedValue))
+    }
+}
+
+private extension NSColor {
+    static func gallaxyHex(_ hex: UInt32, alpha: CGFloat = 1) -> NSColor {
+        NSColor(
+            calibratedRed: CGFloat((hex >> 16) & 0xff) / 255,
+            green: CGFloat((hex >> 8) & 0xff) / 255,
+            blue: CGFloat(hex & 0xff) / 255,
+            alpha: alpha
+        )
+    }
+}
+
+private extension NSShadow {
+    static func gallaxy(color: NSColor, blur: CGFloat, y: CGFloat, draw: () -> Void) {
+        NSGraphicsContext.saveGraphicsState()
+        let shadow = NSShadow()
+        shadow.shadowColor = color
+        shadow.shadowBlurRadius = blur
+        shadow.shadowOffset = NSSize(width: 0, height: -y)
+        shadow.set()
+        draw()
+        NSGraphicsContext.restoreGraphicsState()
+    }
+}
+
+struct GallaxyPlayButton: View {
+    let action: () -> Void
+
+    var body: some View {
+        if #available(macOS 26.0, *) {
+            Button(action: action) {
+                Image(systemName: "play.fill")
+                    .font(.system(size: 24, weight: .black))
+                    .symbolRenderingMode(.monochrome)
+                    .foregroundStyle(Color.white)
+                    .frame(width: 48, height: 48)
+                    .offset(x: 2)
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.glassProminent)
+            .buttonBorderShape(.circle)
+            .controlSize(.large)
+            .tint(GallaxyBrand.brandMaroonReadable)
+            .frame(width: 52, height: 52)
+            .gallaxyHoverGlow(radius: 7, scale: 1.045)
+            .keyboardShortcut(.return, modifiers: [])
+            .accessibilityLabel("Play")
+        } else {
+            Button(action: action) {
+                Image(systemName: "play.fill")
+                    .font(.system(size: 24, weight: .black))
+                    .frame(width: 48, height: 48)
+            }
+            .buttonStyle(RetroRoundButtonStyle())
+            .gallaxyHoverGlow(radius: 7, scale: 1.045)
+            .keyboardShortcut(.return, modifiers: [])
+            .accessibilityLabel("Play")
+        }
+    }
+}
+
+struct GallaxyStopButton: View {
+    let active: Bool
+    let action: () -> Void
+
+    var body: some View {
+        if #available(macOS 26.0, *) {
+            Button(action: action) {
+                Image(systemName: "stop.fill")
+                    .font(.system(size: 16, weight: .black))
+                    .symbolRenderingMode(.monochrome)
+                    .foregroundStyle(Color.white)
+                    .frame(width: 38, height: 38)
+                    .contentShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+            }
+            .buttonStyle(.glassProminent)
+            .buttonBorderShape(.roundedRectangle(radius: 11))
+            .controlSize(.regular)
+            .tint(GallaxyBrand.brandMaroon.opacity(active ? 0.76 : 0.60))
+            .frame(width: 42, height: 42)
+            .gallaxyHoverGlow(radius: 5, scale: 1.04)
+            .accessibilityLabel("Stop")
+        } else {
+            Button(action: action) {
+                Image(systemName: "stop.fill")
+                    .font(.system(size: 16, weight: .black))
+                    .frame(width: 38, height: 38)
+            }
+            .buttonStyle(RetroStopButtonStyle(active: active))
+            .gallaxyHoverGlow(radius: 5, scale: 1.04)
+            .accessibilityLabel("Stop")
+        }
+    }
+}
+
+struct GallaxyPinButton: View {
+    let active: Bool
+    let action: () -> Void
+
+    var body: some View {
+        if #available(macOS 26.0, *) {
+            Button(action: action) {
+                Image(systemName: active ? "pin.fill" : "pin")
+                    .font(.system(size: 12, weight: .bold))
+                    .symbolRenderingMode(.monochrome)
+                    .foregroundStyle(Color.white)
+                    .frame(width: 24, height: 24)
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.glass)
+            .buttonBorderShape(.circle)
+            .controlSize(.small)
+            .tint(GallaxyBrand.brandMaroon.opacity(active ? 0.64 : 0.46))
+            .frame(width: 28, height: 28)
+            .gallaxyHoverGlow(radius: 4, scale: 1.08)
+            .accessibilityLabel(active ? "Unpin Window" : "Pin Window")
+        } else {
+            Button(action: action) {
+                Image(systemName: active ? "pin.fill" : "pin")
+                    .font(.system(size: 12, weight: .bold))
+                    .frame(width: 24, height: 24)
+            }
+            .buttonStyle(RetroPinButtonStyle(active: active))
+            .gallaxyHoverGlow(radius: 4, scale: 1.08)
+            .accessibilityLabel(active ? "Unpin Window" : "Pin Window")
+        }
+    }
+}
+
+struct GlassPlayButtonBackground: View {
+    let pressed: Bool
+
+    var body: some View {
+        Circle()
+            .fill(
+                LinearGradient(
+                    colors: pressed
+                        ? [GallaxyBrand.brandMaroon.opacity(0.92), GallaxyBrand.pageBackground.opacity(0.86)]
+                        : [GallaxyBrand.brandMaroonReadable.opacity(0.96), GallaxyBrand.brandMaroon.opacity(0.78), GallaxyBrand.pageBackground.opacity(0.66)],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+            )
+            .overlay(
+                Circle()
+                    .fill(
+                        RadialGradient(
+                            colors: [
+                                GallaxyBrand.textMain.opacity(pressed ? 0.16 : 0.28),
+                                .clear
+                            ],
+                            center: UnitPoint(x: 0.32, y: 0.24),
+                            startRadius: 1,
+                            endRadius: 30
+                        )
+                    )
+            )
+    }
+}
+
+struct GlassStopButtonBackground: View {
+    let active: Bool
+    let pressed: Bool
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: 11, style: .continuous)
+
+        shape
+            .fill(
+                LinearGradient(
+                    colors: pressed
+                        ? [GallaxyBrand.pageBackground, GallaxyBrand.brandMaroon.opacity(0.52)]
+                        : [GallaxyBrand.textMain.opacity(0.22), GallaxyBrand.pageBackground.opacity(0.76)],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+            )
+            .overlay(
+                shape
+                    .fill(
+                        LinearGradient(
+                            colors: [
+                                GallaxyBrand.textMain.opacity(active ? 0.13 : 0.08),
+                                .clear
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+            )
+    }
+}
+
+struct GlassPinButtonBackground: View {
+    let active: Bool
+    let pressed: Bool
+
+    var body: some View {
+        Circle()
+            .fill(
+                LinearGradient(
+                    colors: active
+                        ? [GallaxyBrand.textMain.opacity(pressed ? 0.14 : 0.22), GallaxyBrand.brandMaroon.opacity(0.48)]
+                        : [GallaxyBrand.textMain.opacity(pressed ? 0.12 : 0.18), GallaxyBrand.pageBackground.opacity(0.70)],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+            )
+    }
+}
+
+struct GlassRowButtonBackground: View {
+    let active: Bool
+    let pressed: Bool
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: 5, style: .continuous)
+
+        if #available(macOS 26.0, *) {
+            shape
+                .fill((active ? GallaxyBrand.brandMaroonReadable : GallaxyBrand.pageBackground).opacity(active ? 0.24 : 0.18))
+                .glassEffect(
+                    .regular.tint(GallaxyBrand.brandMaroon.opacity(active ? 0.22 : 0.14)).interactive(),
+                    in: shape
+                )
+        } else {
+            shape
+                .fill(active ? GallaxyBrand.brandMaroonReadable.opacity(0.34) : GallaxyBrand.pageBackground.opacity(pressed ? 0.42 : 0.26))
+        }
+    }
+}
+
+struct GlassCommandButtonBackground: View {
+    let pressed: Bool
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: 5, style: .continuous)
+
+        if #available(macOS 26.0, *) {
+            shape
+                .fill(GallaxyBrand.textMain.opacity(pressed ? 0.08 : 0.12))
+                .glassEffect(
+                    .regular.tint(GallaxyBrand.brandMaroon.opacity(0.12)).interactive(),
+                    in: shape
+                )
+        } else {
+            shape
+                .fill(pressed ? GallaxyBrand.brandMaroon.opacity(0.74) : GallaxyBrand.pageBackground.opacity(0.36))
+        }
     }
 }
 
@@ -1444,19 +2601,8 @@ struct RetroStopButtonStyle: ButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .foregroundStyle(active ? GallaxyBrand.brandMaroonReadable : GallaxyBrand.textMain.opacity(0.88))
-            .background(
-                RoundedRectangle(cornerRadius: 11, style: .continuous)
-                    .fill(
-                        LinearGradient(
-                            colors: configuration.isPressed
-                                ? [GallaxyBrand.pageBackground, GallaxyBrand.brandMaroon.opacity(0.42)]
-                                : [GallaxyBrand.textMain.opacity(0.18), GallaxyBrand.pageBackground.opacity(0.72)],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                    )
-            )
+            .foregroundStyle(active ? GallaxyBrand.textMain : GallaxyBrand.textMain.opacity(0.94))
+            .background(GlassStopButtonBackground(active: active, pressed: configuration.isPressed))
             .overlay(
                 RoundedRectangle(cornerRadius: 11, style: .continuous)
                     .stroke(active ? GallaxyBrand.brandMaroonReadable.opacity(0.48) : GallaxyBrand.borderSubtle, lineWidth: 1.2)
@@ -1471,18 +2617,11 @@ struct RetroPinButtonStyle: ButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .foregroundStyle(active ? GallaxyBrand.brandMaroonReadable : GallaxyBrand.textMuted)
-            .background(
-                Circle()
-                    .fill(
-                        active
-                            ? GallaxyBrand.textMain.opacity(configuration.isPressed ? 0.11 : 0.16)
-                            : GallaxyBrand.pageBackground.opacity(configuration.isPressed ? 0.78 : 0.58)
-                    )
-            )
+            .foregroundStyle(active ? GallaxyBrand.textMain : GallaxyBrand.textMain.opacity(0.86))
+            .background(GlassPinButtonBackground(active: active, pressed: configuration.isPressed))
             .overlay(
                 Circle()
-                    .stroke(active ? GallaxyBrand.brandMaroonReadable.opacity(0.52) : GallaxyBrand.borderSubtle, lineWidth: 1)
+                    .stroke(active ? GallaxyBrand.brandMaroonReadable.opacity(0.62) : GallaxyBrand.textMain.opacity(0.24), lineWidth: 1)
             )
             .shadow(color: active ? GallaxyBrand.brandMaroonReadable.opacity(0.24) : .clear, radius: 4, x: 0, y: 1)
             .scaleEffect(configuration.isPressed ? 0.92 : 1)
@@ -1492,19 +2631,8 @@ struct RetroPinButtonStyle: ButtonStyle {
 struct RetroRoundButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .foregroundStyle(GallaxyBrand.textMain.opacity(0.94))
-            .background(
-                Circle()
-                    .fill(
-                        LinearGradient(
-                            colors: configuration.isPressed
-                                ? [GallaxyBrand.brandMaroon.opacity(0.84), GallaxyBrand.pageBackground.opacity(0.82)]
-                                : [GallaxyBrand.brandMaroonReadable.opacity(0.88), GallaxyBrand.brandMaroon.opacity(0.74), GallaxyBrand.pageBackground.opacity(0.62)],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                    )
-            )
+            .foregroundStyle(GallaxyBrand.textMain)
+            .background(GlassPlayButtonBackground(pressed: configuration.isPressed))
             .overlay(Circle().stroke(GallaxyBrand.textMain.opacity(0.22), lineWidth: 1.5))
             .shadow(color: GallaxyBrand.brandMaroonReadable.opacity(configuration.isPressed ? 0.12 : 0.34), radius: configuration.isPressed ? 1 : 6, x: 0, y: configuration.isPressed ? 1 : 3)
             .shadow(color: .black.opacity(configuration.isPressed ? 0.2 : 0.5), radius: configuration.isPressed ? 1 : 4, x: 0, y: configuration.isPressed ? 1 : 3)

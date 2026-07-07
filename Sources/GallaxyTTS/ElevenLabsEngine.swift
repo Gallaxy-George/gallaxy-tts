@@ -1,4 +1,10 @@
 import Foundation
+import OSLog
+
+private let elevenLabsLogger = Logger(
+    subsystem: Bundle.main.bundleIdentifier ?? "app.gallaxy.tts.local",
+    category: "ElevenLabs"
+)
 
 enum ElevenLabsSpeechError: LocalizedError {
     case missingAPIKey
@@ -30,12 +36,25 @@ final class ElevenLabsEngine {
     private let playback = PlaybackController()
     private let defaults = UserDefaults.standard
     private var activeTask: URLSessionDataTask?
+    var speedMultiplier: Double = 1.15 {
+        didSet {
+            let rate = speedMultiplier
+            performPlaybackMutation { $0.setRate(rate) }
+        }
+    }
 
     var finishHandler: (() -> Void)? {
         didSet {
             playback.finishHandler = finishHandler
         }
     }
+
+    var startHandler: (() -> Void)? {
+        didSet {
+            playback.startHandler = startHandler
+        }
+    }
+
     var levelHandler: ((Double) -> Void)? {
         didSet {
             playback.levelHandler = levelHandler
@@ -62,15 +81,74 @@ final class ElevenLabsEngine {
 
         let voiceID = defaults.string(forKey: "elevenLabsVoiceID") ?? "JBFqnCBsd6RMkjVDRZzb"
         let modelID = defaults.string(forKey: "elevenLabsModelID") ?? "eleven_flash_v2_5"
-        var components = URLComponents(string: "https://api.elevenlabs.io/v1/text-to-speech/\(voiceID)")
-        components?.queryItems = [URLQueryItem(name: "output_format", value: "mp3_44100_128")]
-        guard let url = components?.url else {
+        let chunks = speechChunks(from: text)
+        guard !chunks.isEmpty else {
+            completion(.success(()))
+            return
+        }
+
+        guard let url = streamURL(voiceID: voiceID) else {
             completion(.failure(ElevenLabsSpeechError.invalidEndpoint))
             return
         }
 
+        let requestStartedAt = Date()
+        stopActiveRequest()
+        elevenLabsLogger.info("ElevenLabs request started chunks=\(chunks.count, privacy: .public) chars=\(text.count, privacy: .public) model=\(modelID, privacy: .public)")
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.playback.beginQueue()
+            self.requestChunk(
+                index: 0,
+                chunks: chunks,
+                url: url,
+                apiKey: apiKey,
+                modelID: modelID,
+                requestStartedAt: requestStartedAt,
+                didEnqueueAudio: false,
+                shouldPlay: shouldPlay,
+                completion: completion
+            )
+        }
+    }
+
+    private func streamURL(voiceID: String) -> URL? {
+        var components = URLComponents(string: "https://api.elevenlabs.io/v1/text-to-speech/\(voiceID)/stream")
+        components?.queryItems = [URLQueryItem(name: "output_format", value: "mp3_44100_128")]
+        return components?.url
+    }
+
+    private func requestChunk(
+        index: Int,
+        chunks: [String],
+        url: URL,
+        apiKey: String,
+        modelID: String,
+        requestStartedAt: Date,
+        didEnqueueAudio: Bool,
+        shouldPlay: @escaping () -> Bool,
+        completion: @escaping (Result<Void, Error>) -> Void
+    ) {
+        guard shouldPlay() else {
+            playback.stop()
+            completion(.failure(ElevenLabsSpeechError.cancelled))
+            return
+        }
+
+        guard index < chunks.count else {
+            activeTask = nil
+            playback.endQueue()
+            elevenLabsLogger.info("ElevenLabs all chunks queued elapsedMs=\(elapsedMilliseconds(since: requestStartedAt), privacy: .public)")
+            completion(.success(()))
+            return
+        }
+
+        let chunk = chunks[index]
+        let chunkStartedAt = Date()
+
         let payload: [String: Any] = [
-            "text": text,
+            "text": chunk,
             "model_id": modelID,
             "voice_settings": [
                 "stability": 0.42,
@@ -85,11 +163,9 @@ final class ElevenLabsEngine {
             return
         }
 
-        stopActiveRequest()
-
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
-        request.timeoutInterval = 25
+        request.timeoutInterval = 15
         request.setValue(apiKey, forHTTPHeaderField: "xi-api-key")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("audio/mpeg", forHTTPHeaderField: "Accept")
@@ -99,7 +175,11 @@ final class ElevenLabsEngine {
             guard let self else { return }
 
             if let error {
-                completion(.failure(error))
+                self.finishAfterChunkError(
+                    error,
+                    didEnqueueAudio: didEnqueueAudio,
+                    completion: completion
+                )
                 return
             }
 
@@ -110,12 +190,20 @@ final class ElevenLabsEngine {
 
             if let httpResponse = response as? HTTPURLResponse, !(200..<300).contains(httpResponse.statusCode) {
                 let bodyMessage = data.flatMap { String(data: $0, encoding: .utf8) } ?? "HTTP \(httpResponse.statusCode)"
-                completion(.failure(ElevenLabsSpeechError.requestFailed(bodyMessage)))
+                self.finishAfterChunkError(
+                    ElevenLabsSpeechError.requestFailed(bodyMessage),
+                    didEnqueueAudio: didEnqueueAudio,
+                    completion: completion
+                )
                 return
             }
 
             guard let data, data.isEmpty == false else {
-                completion(.failure(ElevenLabsSpeechError.missingAudio))
+                self.finishAfterChunkError(
+                    ElevenLabsSpeechError.missingAudio,
+                    didEnqueueAudio: didEnqueueAudio,
+                    completion: completion
+                )
                 return
             }
 
@@ -129,20 +217,85 @@ final class ElevenLabsEngine {
                     }
 
                     do {
-                        try self.playback.playFile(fileURL)
-                        completion(.success(()))
+                        try self.playback.enqueueFile(fileURL)
+                        elevenLabsLogger.info("ElevenLabs chunk queued index=\(index + 1, privacy: .public) total=\(chunks.count, privacy: .public) chars=\(chunk.count, privacy: .public) bytes=\(data.count, privacy: .public) elapsedMs=\(elapsedMilliseconds(since: chunkStartedAt), privacy: .public)")
+                        self.requestChunk(
+                            index: index + 1,
+                            chunks: chunks,
+                            url: url,
+                            apiKey: apiKey,
+                            modelID: modelID,
+                            requestStartedAt: requestStartedAt,
+                            didEnqueueAudio: true,
+                            shouldPlay: shouldPlay,
+                            completion: completion
+                        )
                     } catch {
                         try? FileManager.default.removeItem(at: fileURL)
-                        completion(.failure(error))
+                        self.finishAfterChunkError(
+                            error,
+                            didEnqueueAudio: didEnqueueAudio,
+                            completion: completion
+                        )
                     }
                 }
             } catch {
-                completion(.failure(error))
+                self.finishAfterChunkError(
+                    error,
+                    didEnqueueAudio: didEnqueueAudio,
+                    completion: completion
+                )
             }
         }
 
         activeTask = task
         task.resume()
+    }
+
+    private func finishAfterChunkError(
+        _ error: Error,
+        didEnqueueAudio: Bool,
+        completion: @escaping (Result<Void, Error>) -> Void
+    ) {
+        elevenLabsLogger.error("ElevenLabs chunk failed afterAudio=\(didEnqueueAudio, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.activeTask = nil
+            if didEnqueueAudio {
+                self.playback.endQueue()
+                completion(.success(()))
+            } else {
+                self.playback.stop()
+                completion(.failure(error))
+            }
+        }
+    }
+
+    private func speechChunks(from text: String) -> [String] {
+        let words = text.split(whereSeparator: { $0.isWhitespace }).map(String.init)
+        let maxCharacters = 520
+        var chunks: [String] = []
+        var current = ""
+
+        for word in words {
+            if current.isEmpty {
+                current = word
+                continue
+            }
+
+            if current.count + word.count + 1 > maxCharacters {
+                chunks.append(current)
+                current = word
+            } else {
+                current += " " + word
+            }
+        }
+
+        if !current.isEmpty {
+            chunks.append(current)
+        }
+
+        return chunks
     }
 
     func stop() {
@@ -194,4 +347,8 @@ final class ElevenLabsEngine {
             block(playback)
         }
     }
+}
+
+private func elapsedMilliseconds(since start: Date) -> Int {
+    Int(Date().timeIntervalSince(start) * 1000)
 }

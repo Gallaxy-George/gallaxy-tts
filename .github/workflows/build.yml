@@ -1,0 +1,15 @@
+name: Build
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build app
+        run: scripts/build_app.sh
+      - name: Verify app bundle
+        run: test -d "build/Gallaxy TTS.app"

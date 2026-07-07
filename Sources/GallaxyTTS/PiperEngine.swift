@@ -1,5 +1,11 @@
 import AVFoundation
 import Foundation
+import OSLog
+
+private let piperLogger = Logger(
+    subsystem: Bundle.main.bundleIdentifier ?? "app.gallaxy.tts.local",
+    category: "Piper"
+)
 
 final class PiperEngine {
     private let playback = PlaybackController()
@@ -7,7 +13,11 @@ final class PiperEngine {
     private var workerProcess: Process?
     private var workerInput: FileHandle?
     private var workerOutput: FileHandle?
-    var speedMultiplier: Double = 1.15
+    var speedMultiplier: Double = 1.15 {
+        didSet {
+            setPlaybackRate(speedMultiplier)
+        }
+    }
     var finishHandler: (() -> Void)? {
         didSet {
             playback.finishHandler = finishHandler
@@ -33,11 +43,17 @@ final class PiperEngine {
 
     func warmUp() {
         do {
+            let startedAt = Date()
             try ensureWorkerStarted()
-            NSLog("Gallaxy TTS Piper worker is warm.")
+            piperLogger.info("Piper worker warm elapsedMs=\(elapsedMilliseconds(since: startedAt), privacy: .public)")
         } catch {
-            NSLog("Gallaxy TTS Piper worker warmup failed: \(error.localizedDescription)")
+            piperLogger.error("Piper worker warmup failed error=\(error.localizedDescription, privacy: .public)")
         }
+    }
+
+    func prepareAfterWake() {
+        resetWorker()
+        warmUp()
     }
 
     func speak(
@@ -112,6 +128,13 @@ final class PiperEngine {
     func stop() {
         DispatchQueue.main.async { [playback] in
             playback.stop()
+        }
+    }
+
+    private func setPlaybackRate(_ multiplier: Double) {
+        _ = performPlaybackMutation { playback in
+            playback.setRate(multiplier)
+            return true
         }
     }
 
@@ -286,6 +309,7 @@ final class PiperEngine {
         var didEnqueueAudio = false
         do {
             for chunk in chunks {
+                let chunkStartedAt = Date()
                 guard shouldPlay() else {
                     cancelPlaybackQueue()
                     completion(.success(()))
@@ -293,7 +317,7 @@ final class PiperEngine {
                 }
 
                 let outputURL = try temporaryWavURL()
-                guard try synthesizeWithWorker(text: chunk, outputURL: outputURL) else {
+                guard try synthesizeWithWorkerRetryingOnce(text: chunk, outputURL: outputURL) else {
                     try? fileManager.removeItem(at: outputURL)
                     throw PiperError.processFailed("Piper worker did not synthesize audio.")
                 }
@@ -304,6 +328,7 @@ final class PiperEngine {
                     return
                 }
                 didEnqueueAudio = true
+                piperLogger.info("Piper chunk queued chars=\(chunk.count, privacy: .public) elapsedMs=\(elapsedMilliseconds(since: chunkStartedAt), privacy: .public)")
             }
 
             endPlaybackQueue()
@@ -441,6 +466,17 @@ final class PiperEngine {
         }
     }
 
+    private func synthesizeWithWorkerRetryingOnce(text: String, outputURL: URL) throws -> Bool {
+        if try synthesizeWithWorker(text: text, outputURL: outputURL) {
+            return true
+        }
+
+        piperLogger.info("Piper worker retrying after failed synthesis")
+        resetWorker()
+        try ensureWorkerStarted()
+        return try synthesizeWithWorker(text: text, outputURL: outputURL)
+    }
+
     private func synthesizeWithWorker(text: String, outputURL: URL) throws -> Bool {
         guard piperWorkerInvocation != nil else { return false }
 
@@ -472,13 +508,19 @@ final class PiperEngine {
             let message = object["error"] as? String ?? "Piper worker failed."
             throw PiperError.processFailed(message)
         } catch {
-            workerProcess?.terminate()
-            workerProcess = nil
-            workerInput = nil
-            workerOutput = nil
-            NSLog("Gallaxy TTS Piper worker failed, falling back to one-shot helper: \(error.localizedDescription)")
+            resetWorker()
+            piperLogger.error("Piper worker synthesis failed error=\(error.localizedDescription, privacy: .public)")
             return false
         }
+    }
+
+    private func resetWorker() {
+        workerInput = nil
+        workerOutput = nil
+        if let workerProcess, workerProcess.isRunning {
+            workerProcess.terminate()
+        }
+        workerProcess = nil
     }
 
     private func readWorkerLine() throws -> String {
@@ -500,8 +542,12 @@ final class PiperEngine {
     }
 
     private var lengthScale: Double {
-        1.0 / max(0.5, min(speedMultiplier, 1.8))
+        1.0
     }
+}
+
+private func elapsedMilliseconds(since start: Date) -> Int {
+    Int(Date().timeIntervalSince(start) * 1000)
 }
 
 private struct PiperInvocation {

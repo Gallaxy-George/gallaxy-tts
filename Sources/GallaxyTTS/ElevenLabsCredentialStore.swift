@@ -1,6 +1,4 @@
 import Foundation
-import LocalAuthentication
-import Security
 
 enum ElevenLabsCredentialError: LocalizedError {
     case emptyKey
@@ -17,29 +15,11 @@ enum ElevenLabsCredentialError: LocalizedError {
 }
 
 enum ElevenLabsCredentialStore {
-    private static let service = "app.gallaxy.tts.elevenlabs"
-    private static let legacyService = "app.textblitz.elevenlabs"
-    private static let account = "api-key"
     private static let directoryName = "Gallaxy TTS"
-    private static let legacyDirectoryName = "TextBlitz"
     private static let credentialFileName = "elevenlabs-api-key.txt"
 
     static func apiKey() -> String? {
-        if let fileKey = fileAPIKey(directoryName: directoryName) {
-            return fileKey
-        }
-
-        if let migratedKey = fileAPIKey(directoryName: legacyDirectoryName) {
-            try? saveAPIKey(migratedKey)
-            return migratedKey
-        }
-
-        if let migratedKey = legacyKeychainAPIKeyWithoutPrompt(service: legacyService) {
-            try? saveAPIKey(migratedKey)
-            return migratedKey
-        }
-
-        return nil
+        fileAPIKey(directoryName: directoryName)
     }
 
     static func hasAPIKey() -> Bool {
@@ -69,10 +49,6 @@ enum ElevenLabsCredentialStore {
         if let fileURL = try? credentialsDirectoryURL(directoryName: directoryName).appendingPathComponent(credentialFileName, isDirectory: false) {
             try? FileManager.default.removeItem(at: fileURL)
         }
-        if let legacyFileURL = try? credentialsDirectoryURL(directoryName: legacyDirectoryName).appendingPathComponent(credentialFileName, isDirectory: false) {
-            try? FileManager.default.removeItem(at: legacyFileURL)
-        }
-        deleteLegacyKeychainItem(service: legacyService)
     }
 
     private static func fileAPIKey(directoryName: String) -> String? {
@@ -95,41 +71,5 @@ enum ElevenLabsCredentialStore {
         }
 
         return applicationSupportURL.appendingPathComponent(directoryName, isDirectory: true)
-    }
-
-    private static func legacyKeychainAPIKeyWithoutPrompt(service: String) -> String? {
-        var query = baseQuery(service: service)
-        query[kSecReturnData as String] = true
-        query[kSecMatchLimit as String] = kSecMatchLimitOne
-        query[kSecUseAuthenticationContext as String] = nonInteractiveContext()
-
-        var item: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &item)
-        guard status == errSecSuccess, let data = item as? Data else {
-            return nil
-        }
-
-        let trimmed = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed?.isEmpty == false ? trimmed : nil
-    }
-
-    private static func deleteLegacyKeychainItem(service: String) {
-        var query = baseQuery(service: service)
-        query[kSecUseAuthenticationContext as String] = nonInteractiveContext()
-        SecItemDelete(query as CFDictionary)
-    }
-
-    private static func nonInteractiveContext() -> LAContext {
-        let context = LAContext()
-        context.interactionNotAllowed = true
-        return context
-    }
-
-    private static func baseQuery(service: String = service) -> [String: Any] {
-        [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account
-        ]
     }
 }

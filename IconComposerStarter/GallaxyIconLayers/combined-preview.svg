@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <radialGradient id="bg" cx="50%" cy="42%" r="70%">
+      <stop offset="0" stop-color="#222222"/>
+      <stop offset="0.58" stop-color="#101010"/>
+      <stop offset="1" stop-color="#050505"/>
+    </radialGradient>
+  </defs>
+  <rect x="112" y="112" width="800" height="800" rx="176" fill="url(#bg)"/>
+  <rect x="112" y="112" width="800" height="800" rx="176" fill="none" stroke="#2a2a2a" stroke-width="18"/>
+  <path d="M548 336
+           C489 336 438 372 402 430
+           C351 512 369 615 438 672
+           C505 728 604 725 669 668
+           C704 637 728 592 736 542
+           L560 542"
+        fill="none"
+        stroke="#f7f7f7"
+        stroke-width="58"
+        stroke-linecap="round"
+        stroke-linejoin="round"/>
+  <path d="M548 336
+           C489 336 438 372 402 430
+           C351 512 369 615 438 672
+           C505 728 604 725 669 668
+           C704 637 728 592 736 542
+           L560 542"
+        fill="none"
+        stroke="#6d6d6d"
+        stroke-width="28"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        opacity="0.55"/>
+  <circle cx="512" cy="512" r="58" fill="#9f1437"/>
+  <circle cx="512" cy="512" r="58" fill="none" stroke="#ffffff" stroke-width="11"/>
+  <circle cx="493" cy="493" r="20" fill="#ff6b88" opacity="0.72"/>
+</svg>

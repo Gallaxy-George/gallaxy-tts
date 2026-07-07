@@ -1,0 +1,15 @@
+*.swift text eol=lf
+*.sh text eol=lf
+*.command text eol=lf
+*.py text eol=lf
+*.plist text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+
+*.icns binary
+*.png binary
+*.ttf binary
+*.onnx binary
+*.wav binary
+*.mp3 binary

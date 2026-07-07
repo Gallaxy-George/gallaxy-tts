@@ -55,8 +55,8 @@ echo "3. Gallaxy TTS tries selected text first. If none is selected, it reads cl
 echo
 echo "Use Stop to halt speech. Use Slower/Faster or the slider to adjust speed."
 echo
-echo "You should also see a small 'GT' item in the macOS menu bar as a backup."
-echo "Click GT for Speak Selection, Speak Clipboard, Stop Speaking, Show Widget, or Quit."
+echo "You should also see a small Gallaxy TTS icon in the macOS menu bar as a backup."
+echo "Click it for Speak Selection, Speak Clipboard, Stop Speaking, Show Widget, or Quit."
 echo
 echo "Fallback:"
 echo "Right-click highlighted text > Services > Speak Selection with Gallaxy TTS."

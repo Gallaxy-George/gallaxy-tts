@@ -1,25 +1,37 @@
 import Foundation
+import OSLog
+
+private let speechLogger = Logger(
+    subsystem: Bundle.main.bundleIdentifier ?? "app.gallaxy.tts.local",
+    category: "Speech"
+)
 
 final class SpeechRequestRouter {
     static let shared = SpeechRequestRouter()
 
     private let workQueue = DispatchQueue(label: "app.gallaxy.tts.speech", qos: .userInitiated)
+    private let warmQueue = DispatchQueue(label: "app.gallaxy.tts.speech.warm", qos: .utility)
     private let normalizer = TextNormalizer()
-    private let piper = PiperEngine()
+    private let kokoro = KokoroEngine()
     private let apple = AppleSpeechEngine()
     private let elevenLabs = ElevenLabsEngine()
     private let defaults = UserDefaults.standard
 
     private var activeToken = UUID()
     private var isGeneratingSpeech = false
+    private var keepWarmTimer: DispatchSourceTimer?
+    private var isBackgroundWarmRunning = false
     var activityHandler: (() -> Void)?
     var levelHandler: ((Double) -> Void)?
 
     private init() {
         let savedSpeed = defaults.double(forKey: "speechSpeedMultiplier")
         speechSpeedMultiplier = savedSpeed > 0 ? savedSpeed : 1.15
-        piper.finishHandler = { [weak self] in
+        kokoro.finishHandler = { [weak self] in
             self?.speechDidFinish()
+        }
+        kokoro.startHandler = { [weak self] in
+            self?.speechDidStart()
         }
         apple.finishHandler = { [weak self] in
             self?.speechDidFinish()
@@ -27,7 +39,10 @@ final class SpeechRequestRouter {
         elevenLabs.finishHandler = { [weak self] in
             self?.speechDidFinish()
         }
-        piper.levelHandler = { [weak self] level in
+        elevenLabs.startHandler = { [weak self] in
+            self?.speechDidStart()
+        }
+        kokoro.levelHandler = { [weak self] level in
             self?.levelHandler?(level)
         }
         elevenLabs.levelHandler = { [weak self] level in
@@ -37,23 +52,39 @@ final class SpeechRequestRouter {
 
     var speechSpeedMultiplier: Double {
         get {
-            piper.speedMultiplier
+            kokoro.speedMultiplier
         }
         set {
             let clamped = max(0.75, min(newValue, 1.6))
-            piper.speedMultiplier = clamped
+            kokoro.speedMultiplier = clamped
             apple.speedMultiplier = clamped
+            elevenLabs.speedMultiplier = clamped
             defaults.set(clamped, forKey: "speechSpeedMultiplier")
         }
     }
 
     func warmUp() {
-        workQueue.async { [piper] in
-            piper.warmUp()
+        workQueue.async { [weak self] in
+            guard let self else { return }
+            self.startKeepWarmTimer()
+            self.scheduleBackgroundWarm(reason: "warmup") { kokoro in
+                kokoro.warmUp()
+            }
+        }
+    }
+
+    func prepareAfterWake() {
+        workQueue.async { [weak self] in
+            guard let self else { return }
+            self.startKeepWarmTimer()
+            self.scheduleBackgroundWarm(reason: "wake refresh") { kokoro in
+                kokoro.prepareAfterWake()
+            }
         }
     }
 
     func speak(_ rawText: String, source: String) {
+        let requestStartedAt = Date()
         let token = UUID()
         activeToken = token
         isGeneratingSpeech = true
@@ -67,6 +98,7 @@ final class SpeechRequestRouter {
         }
 
         let selectedProvider = voiceProvider
+        speechLogger.info("Speech request source=\(source, privacy: .public) provider=\(selectedProvider.rawValue, privacy: .public) chars=\(text.count, privacy: .public)")
 
         workQueue.async { [weak self] in
             guard let self else { return }
@@ -84,15 +116,17 @@ final class SpeechRequestRouter {
                     }
 
                     if case .failure(let error) = result {
-                        NSLog("Gallaxy TTS ElevenLabs failed from \(source): \(error.localizedDescription)")
+                        speechLogger.error("ElevenLabs failed source=\(source, privacy: .public) elapsedMs=\(elapsedMilliseconds(since: requestStartedAt), privacy: .public) error=\(error.localizedDescription, privacy: .public)")
                         self.workQueue.async {
                             guard self.activeToken == token else { return }
-                            self.speakLocal(text, source: source, token: token)
+                            self.speakLocal(text, source: source, token: token, requestStartedAt: requestStartedAt)
                         }
+                    } else {
+                        speechLogger.info("ElevenLabs request completed source=\(source, privacy: .public) elapsedMs=\(elapsedMilliseconds(since: requestStartedAt), privacy: .public)")
                     }
                 }
             default:
-                self.speakLocal(text, source: source, token: token)
+                self.speakLocal(text, source: source, token: token, requestStartedAt: requestStartedAt)
             }
         }
     }
@@ -105,7 +139,7 @@ final class SpeechRequestRouter {
 
     private func stopPlayback() {
         elevenLabs.stop()
-        piper.stop()
+        kokoro.stop()
         apple.stop()
         levelHandler?(0)
     }
@@ -113,25 +147,25 @@ final class SpeechRequestRouter {
     @discardableResult
     func pause() -> Bool {
         let didPauseElevenLabs = elevenLabs.pause()
-        let didPausePiper = piper.pause()
+        let didPauseKokoro = kokoro.pause()
         let didPauseApple = apple.pause()
-        return didPauseElevenLabs || didPausePiper || didPauseApple
+        return didPauseElevenLabs || didPauseKokoro || didPauseApple
     }
 
     @discardableResult
     func resume() -> Bool {
         let didResumeElevenLabs = elevenLabs.resume()
-        let didResumePiper = piper.resume()
+        let didResumeKokoro = kokoro.resume()
         let didResumeApple = apple.resume()
-        return didResumeElevenLabs || didResumePiper || didResumeApple
+        return didResumeElevenLabs || didResumeKokoro || didResumeApple
     }
 
     var isSpeaking: Bool {
-        isGeneratingSpeech || elevenLabs.isSpeaking || piper.isSpeaking || apple.isSpeaking
+        isGeneratingSpeech || elevenLabs.isSpeaking || kokoro.isSpeaking || apple.isSpeaking
     }
 
     var isPaused: Bool {
-        elevenLabs.isPaused || piper.isPaused || apple.isPaused
+        elevenLabs.isPaused || kokoro.isPaused || apple.isPaused
     }
 
     var statusLine: String {
@@ -143,17 +177,58 @@ final class SpeechRequestRouter {
         activityHandler?()
     }
 
+    private func speechDidStart() {
+        isGeneratingSpeech = false
+        activityHandler?()
+    }
+
     private var voiceProvider: VoiceProviderOption {
         guard let rawValue = defaults.string(forKey: "voiceProvider"),
               let provider = VoiceProviderOption(rawValue: rawValue) else {
-            return .localPiper
+            return .localKokoro
         }
-        return provider
+        return VoiceProviderOption.savedValue(provider.rawValue)
     }
 
-    private func speakLocal(_ text: String, source: String, token: UUID) {
-        if piper.isReady {
-            piper.speak(
+    private func startKeepWarmTimer() {
+        guard keepWarmTimer == nil else { return }
+
+        let timer = DispatchSource.makeTimerSource(queue: workQueue)
+        timer.schedule(deadline: .now() + .seconds(75), repeating: .seconds(120), leeway: .seconds(15))
+        timer.setEventHandler { [weak self] in
+            guard let self else { return }
+            guard self.voiceProvider == .localKokoro else { return }
+            guard !self.isGeneratingSpeech, !self.kokoro.isSpeaking, !self.kokoro.isPaused else { return }
+
+            self.scheduleBackgroundWarm(reason: "keepalive") { kokoro in
+                kokoro.keepWarm()
+            }
+        }
+        keepWarmTimer = timer
+        timer.resume()
+    }
+
+    private func scheduleBackgroundWarm(reason: String, action: @escaping (KokoroEngine) -> Void) {
+        guard !isBackgroundWarmRunning else {
+            speechLogger.info("Speech background \(reason, privacy: .public) skipped because another warm task is running")
+            return
+        }
+
+        isBackgroundWarmRunning = true
+        warmQueue.async { [weak self] in
+            guard let self else { return }
+            let startedAt = Date()
+            action(self.kokoro)
+            speechLogger.info("Speech background \(reason, privacy: .public) finished elapsedMs=\(elapsedMilliseconds(since: startedAt), privacy: .public)")
+            self.workQueue.async { [weak self] in
+                self?.isBackgroundWarmRunning = false
+            }
+        }
+    }
+
+    private func speakLocal(_ text: String, source: String, token: UUID, requestStartedAt: Date) {
+        if kokoro.isReady {
+            kokoro.speak(
                 text,
                 shouldPlay: { [weak self] in
                     self?.activeToken == token
@@ -165,19 +240,22 @@ final class SpeechRequestRouter {
                 }
 
                 if case .failure(let error) = result {
-                    NSLog("Gallaxy TTS Piper failed from \(source): \(error.localizedDescription)")
-                    DispatchQueue.main.async {
-                        guard self.activeToken == token else { return }
-                        self.apple.speak(text)
-                    }
+                    speechLogger.error("Kokoro failed source=\(source, privacy: .public) elapsedMs=\(elapsedMilliseconds(since: requestStartedAt), privacy: .public) error=\(error.localizedDescription, privacy: .public)")
+                } else {
+                    speechLogger.info("Kokoro request completed source=\(source, privacy: .public) elapsedMs=\(elapsedMilliseconds(since: requestStartedAt), privacy: .public)")
                 }
             }
         } else {
             DispatchQueue.main.async {
                 guard self.activeToken == token else { return }
                 self.isGeneratingSpeech = false
+                speechLogger.info("Kokoro unavailable; using Apple speech source=\(source, privacy: .public)")
                 self.apple.speak(text)
             }
         }
     }
+}
+
+private func elapsedMilliseconds(since start: Date) -> Int {
+    Int(Date().timeIntervalSince(start) * 1000)
 }

@@ -1,8 +1,16 @@
 import AppKit
+import OSLog
+
+private let appLogger = Logger(
+    subsystem: Bundle.main.bundleIdentifier ?? "app.gallaxy.tts.local",
+    category: "App"
+)
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
+    private var responsivenessActivity: NSObjectProtocol?
     private let router = SpeechRequestRouter.shared
+    private let selectionFallbackQueue = DispatchQueue(label: "app.gallaxy.tts.selectionFallback", qos: .userInitiated)
     private lazy var previousApplicationTracker = PreviousApplicationTracker(
         ownBundleIdentifier: Bundle.main.bundleIdentifier ?? "app.gallaxy.tts.local"
     )
@@ -23,14 +31,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         previousApplicationTracker.start()
         setupStatusItem()
         hotkeyController.start()
+        beginResponsivenessActivity()
         router.warmUp()
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(systemDidWake),
+            name: NSWorkspace.didWakeNotification,
+            object: nil
+        )
         widgetWindow.showWindow(nil)
     }
 
+    func applicationWillTerminate(_ notification: Notification) {
+        if let responsivenessActivity {
+            ProcessInfo.processInfo.endActivity(responsivenessActivity)
+        }
+    }
+
     private func setupStatusItem() {
-        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        item.button?.title = "GT"
-        item.button?.toolTip = "Gallaxy TTS"
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        if let button = item.button {
+            button.toolTip = "Gallaxy TTS"
+            if let image = statusBarImage() {
+                button.image = image
+                button.imagePosition = .imageOnly
+            } else {
+                item.length = NSStatusItem.variableLength
+                button.title = "GT"
+            }
+        }
 
         let menu = NSMenu()
         let speakSelectionItem = NSMenuItem(title: "Speak Selection", action: #selector(speakSelection), keyEquivalent: " ")
@@ -51,6 +80,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem = item
     }
 
+    private func statusBarImage() -> NSImage? {
+        guard let url = Bundle.main.url(forResource: "GallaxyTTS", withExtension: "icns"),
+              let image = NSImage(contentsOf: url) else {
+            return nil
+        }
+
+        image.size = NSSize(width: 18, height: 18)
+        image.isTemplate = false
+        return image
+    }
+
+    private func beginResponsivenessActivity() {
+        responsivenessActivity = ProcessInfo.processInfo.beginActivity(
+            options: .userInitiatedAllowingIdleSystemSleep,
+            reason: "Keep Gallaxy TTS speech playback responsive."
+        )
+    }
+
     @objc private func speakSelection() {
         speakSelectionFromPreviousApp()
     }
@@ -63,18 +110,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func playFromWidget() -> WidgetPlayResult {
-        if let selectedText = hotkeyController.currentSelectionTextFast(
-            from: previousApplicationTracker.lastNonGallaxyTTSApplication
-        ) {
-            router.speak(selectedText, source: "selection")
-            return .selection(selectedText)
-        }
-
+        let startedAt = Date()
         if let clipboardText = clipboardText() {
+            appLogger.info("Widget play using clipboard chars=\(clipboardText.count, privacy: .public) elapsedMs=\(self.elapsedMilliseconds(since: startedAt), privacy: .public)")
             router.speak(clipboardText, source: "clipboard")
             return .clipboard(clipboardText)
         }
 
+        if let selectedText = fastSelectionText(timeout: 0.30, startedAt: startedAt) {
+            appLogger.info("Widget play using selection chars=\(selectedText.count, privacy: .public) elapsedMs=\(self.elapsedMilliseconds(since: startedAt), privacy: .public)")
+            router.speak(selectedText, source: "selection")
+            return .selection(selectedText)
+        }
+
+        appLogger.info("Widget play found no text elapsedMs=\(self.elapsedMilliseconds(since: startedAt), privacy: .public)")
         return .empty
     }
 
@@ -107,6 +156,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         router.stop()
     }
 
+    @objc private func systemDidWake() {
+        appLogger.info("System wake detected; refreshing speech engines")
+        router.prepareAfterWake()
+    }
+
     @objc private func showWidget() {
         NSApp.activate(ignoringOtherApps: true)
         widgetWindow.showWindow(nil)
@@ -114,5 +168,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func quit() {
         NSApp.terminate(nil)
+    }
+
+    private func fastSelectionText(timeout: TimeInterval, startedAt: Date) -> String? {
+        let sourceApplication = previousApplicationTracker.lastNonGallaxyTTSApplication
+        let semaphore = DispatchSemaphore(value: 0)
+        var selectedText: String?
+
+        selectionFallbackQueue.async { [hotkeyController] in
+            selectedText = hotkeyController.currentSelectionTextFast(from: sourceApplication)
+            semaphore.signal()
+        }
+
+        let result = semaphore.wait(timeout: .now() + timeout)
+        guard result == .success else {
+            appLogger.info("Widget selection fallback timed out timeoutMs=\(Int(timeout * 1000), privacy: .public) elapsedMs=\(self.elapsedMilliseconds(since: startedAt), privacy: .public)")
+            return nil
+        }
+        return selectedText
+    }
+
+    private func elapsedMilliseconds(since start: Date) -> Int {
+        Int(Date().timeIntervalSince(start) * 1000)
     }
 }

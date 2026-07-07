@@ -8,6 +8,8 @@ final class PlaybackController: NSObject, AVAudioPlayerDelegate {
     private var queueIsOpen = false
     private var meterTimer: Timer?
     private var previousMeterLevel = 0.0
+    private var playbackRate: Float = 1.15
+    var startHandler: (() -> Void)?
     var finishHandler: (() -> Void)?
     var levelHandler: ((Double) -> Void)?
 
@@ -51,10 +53,13 @@ final class PlaybackController: NSObject, AVAudioPlayerDelegate {
         let nextPlayer = try AVAudioPlayer(contentsOf: url)
         nextPlayer.delegate = self
         nextPlayer.isMeteringEnabled = true
+        nextPlayer.enableRate = true
+        nextPlayer.rate = playbackRate
         nextPlayer.prepareToPlay()
         player = nextPlayer
         activeFileURL = url
         if nextPlayer.play() {
+            startHandler?()
             startMetering()
         }
     }
@@ -84,6 +89,14 @@ final class PlaybackController: NSObject, AVAudioPlayerDelegate {
         queueIsOpen = false
         removeActiveFile()
         removeQueuedFiles()
+    }
+
+    func setRate(_ multiplier: Double) {
+        let clampedRate = Float(max(0.5, min(multiplier, 2.0)))
+        playbackRate = clampedRate
+        guard let player else { return }
+        player.enableRate = true
+        player.rate = clampedRate
     }
 
     func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
