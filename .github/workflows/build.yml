@@ -12,6 +12,8 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install validation tools
+        run: brew install ripgrep
       - name: Validate source
         run: scripts/validate_source.sh
       - name: Build app
