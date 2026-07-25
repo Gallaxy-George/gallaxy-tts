@@ -1,0 +1,62 @@
+# macOS local files
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+Icon?
+.Spotlight-V100
+.Trashes
+
+# Swift and Xcode build products
+build/
+dist/
+DerivedData/
+.swiftpm/
+*.dSYM/
+*.xcuserstate
+*.xcuserdatad/
+
+# Generated app/distribution artifacts
+*.app/
+*.dmg
+*.pkg
+*.zip
+
+# Downloaded TTS runtimes and model weights
+Resources/KokoroRuntime/
+Resources/Models/
+*.onnx
+*.gguf
+*.safetensors
+*.ckpt
+*.pt
+
+# Python local/runtime output
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+pip-wheel-metadata/
+
+# Secrets and local credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+*.key
+*.mobileprovision
+*.provisionprofile
+*api-key*.txt
+*apikey*.txt
+*secret*.txt
+*token*.txt
+
+# Logs and scratch files
+*.log
+*.tmp
+.cache/
+
+# Local backups
+backups/

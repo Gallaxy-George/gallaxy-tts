@@ -1,0 +1,20 @@
+version = 1
+name = "Gallaxy TTS"
+
+[setup]
+script = "scripts/validate_source.sh"
+
+[[actions]]
+name = "Build and Run"
+icon = "run"
+command = "./script/build_and_run.sh --run"
+
+[[actions]]
+name = "Build and Verify"
+icon = "test"
+command = "./script/build_and_run.sh --verify"
+
+[[actions]]
+name = "Stream Logs"
+icon = "logs"
+command = "./script/build_and_run.sh --logs"
