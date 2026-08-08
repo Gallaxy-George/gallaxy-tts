@@ -1,7 +1,7 @@
 # Direct runtime dependencies are pinned so a fresh setup cannot silently
 # switch to an unreviewed release. Security-sensitive transitive packages are
 # constrained to versions that include the July 2026 advisory fixes.
-mlx-audio[tts]==0.4.4
+mlx-audio[tts]==0.4.7
 misaki[en]==0.9.4
 soundfile==0.14.0
 pillow==12.3.0
