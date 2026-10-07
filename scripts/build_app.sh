@@ -43,6 +43,9 @@ if [ -f "$ROOT_DIR/Resources/kokoro_worker.py" ]; then
   cp "$ROOT_DIR/Resources/kokoro_worker.py" "$RESOURCES_DIR/kokoro_worker.py"
 fi
 
+cp "$ROOT_DIR/Resources/kokoro_captions.py" "$RESOURCES_DIR/kokoro_captions.py"
+cp "$ROOT_DIR/Resources/kokoro_runtime.py" "$RESOURCES_DIR/kokoro_runtime.py"
+
 xcrun swiftc \
   -O \
   -target "$(uname -m)-apple-macos13.0" \

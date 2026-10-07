@@ -8,17 +8,15 @@ Gallaxy TTS is a Gallaxy Enterprises project.
 Highlight text -> press Option+Space -> Gallaxy TTS speaks it
 ```
 
-The app can also speak clipboard text, stop/pause/resume playback, pin the widget above other windows, and fall back to Apple's built-in local speech when optional neural voices are not installed.
+The app can also speak clipboard text, stop/pause/resume playback, and pin the widget above other windows. Kokoro is the only active speech engine.
 
-Selection reading uses macOS Accessibility. If permission is not granted yet, macOS may prompt for it the first time you use the selection hotkey or Services action. Clipboard playback does not require Accessibility permission.
+Startup never requests Accessibility permission. Reading selected text through the global shortcut checks permission silently first and requests it only if needed, at most once per session. Clipboard playback and the macOS Services pasteboard do not require Accessibility permission.
 
 ## Requirements
 
-- macOS 13 or newer
+- macOS 14 or newer on Apple Silicon for Kokoro playback
 - Xcode Command Line Tools: `xcode-select --install`
-- Optional for Kokoro local neural TTS: macOS 14 or newer, an Apple Silicon
-  Mac, and Python 3.10 or newer
-- Optional for ElevenLabs cloud TTS: your own ElevenLabs API key
+- Python 3.10 or newer for the local Kokoro runtime
 
 No API key is included in this repository.
 
@@ -33,7 +31,7 @@ scripts/build_app.sh
 open "build/Gallaxy TTS.app"
 ```
 
-The app should open immediately and can speak copied text with Apple's built-in local voice. No cloud account, API key, or local model is required for this first run.
+The widget opens immediately. Install the Kokoro runtime below before playing text. No cloud account or API key is required.
 
 Or double-click:
 
@@ -49,7 +47,7 @@ If `scripts/build_app.sh` says `xcrun` or `swiftc` is missing, install Apple's c
 xcode-select --install
 ```
 
-Local builds use a stable Gallaxy TTS development identity, so macOS Accessibility approval survives normal rebuilds. The first local build still needs approval in **System Settings > Privacy & Security > Accessibility**.
+Local builds retain the existing Gallaxy TTS development identity. macOS manages Accessibility approval for the running app; different installed copies or signing changes can affect that approval. The app never asks at launch. Selection reading requires approval in **System Settings > Privacy & Security > Accessibility**.
 
 ## Icon and Menu Bar
 
@@ -57,23 +55,15 @@ The app icon is stored in `Resources/GallaxyTTS.icns` and is copied into the gen
 
 The menu-bar item loads the same bundled icon. If the icon resource is missing, the app falls back to a `GT` text item.
 
-## Voice Modes
+## Voice
 
-Out of the box:
+Kokoro 82M through MLX Audio is the sole active provider. Older cloud-provider
+preferences are ignored. The app does not access saved cloud credentials and
+does not silently switch to another voice when Kokoro fails; the existing widget
+console reports the failure. Legacy engine source remains for reference, outside
+the active request path.
 
-- Apple local speech works immediately as the fallback local voice.
-
-Optional local neural voice:
-
-- Kokoro 82M through MLX Audio when installed on Apple Silicon
-
-Optional cloud voice:
-
-- ElevenLabs through a user-provided API key
-- The key is saved only on the user's Mac in Keychain
-- Text requested while ElevenLabs is selected is sent to ElevenLabs over HTTPS
-
-See [PRIVACY.md](PRIVACY.md) for the complete data-handling summary.
+See [PRIVACY.md](PRIVACY.md) for the data-handling summary.
 
 ## Add Kokoro Local Neural TTS
 
@@ -95,28 +85,16 @@ Python packages are installed from the fully pinned, hash-verified
 that lock are in `config/kokoro-requirements.txt`. The generated app bundle
 contains the Kokoro helper scripts and uses the Application Support runtime.
 
-After setup, choose the local/Kokoro voice option in the app. If Kokoro is unavailable for any reason, Gallaxy TTS falls back to Apple's built-in speech.
+After setup, Kokoro is selected automatically. If an older runtime is installed,
+run the setup script again to bring it into agreement with the checked-in lock.
+For isolated development, set `KOKORO_RUNTIME_DIR` when running setup and
+`GALLAXY_KOKORO_PYTHON` to that runtime's `venv/bin/python` when launching the app.
+The override applies to both persistent and one-shot synthesis.
 
-## Add ElevenLabs Cloud TTS
-
-1. Open Gallaxy TTS.
-2. Choose the ElevenLabs voice provider in the widget.
-3. Paste your own ElevenLabs API key into the API key field.
-4. Save it.
-
-The key is stored only on your Mac:
-
-```text
-macOS Keychain item: app.gallaxy.tts.elevenlabs / api-key
-```
-
-Older development builds used a plaintext Application Support file. Current
-builds migrate that file into Keychain and delete it after a successful
-migration or save. A legacy plaintext credential is never used directly.
-
-When ElevenLabs is selected, text the user asks the app to speak is sent
-directly to the ElevenLabs API over HTTPS. Apple speech and Kokoro speech remain
-local.
+The pinned MLX Audio 0.4.4 runtime needs a process-local harmonic-length guard
+for [upstream issue #803](https://github.com/Blaizzy/mlx-audio/issues/803).
+`kokoro_runtime.py` applies that guard after validating dependency versions;
+it does not modify the installed package, model, or voice.
 
 ## Packaging
 
@@ -143,7 +121,7 @@ non-ignored files:
 scripts/package_source.sh
 ```
 
-Release packages do not bundle the optional Kokoro runtime or model. Users
+Release packages do not bundle the Kokoro runtime or model. Users
 install it locally with the setup script.
 
 ## Repository Hygiene
@@ -169,3 +147,38 @@ Bundled fonts retain their SIL Open Font License terms; see
 `THIRD_PARTY_NOTICES.md` and `Resources/Fonts/OFL-1.1.txt`.
 
 Project support: [support@gallaxyenterprises.com](mailto:support@gallaxyenterprises.com)
+
+### Spoken captions
+
+During narration, the widget display shows large, centered phrases with the
+spoken text's punctuation. Pause holds the current phrase; resume continues from
+that position. Stop, completion, and a new request clear the previous caption.
+The existing widget resize control also scales the captions.
+
+Local Kokoro remains free and uses the same pinned model and voice. Caption
+boundaries come from the pinned MLX pipeline's predicted token durations and
+are advanced using the audio player's position (including playback speed
+changes). These are model-derived timings, not independently measured word
+alignment. Segment offsets use the actual generated sample counts. The temporary
+caption sidecar is removed when loaded or discarded, and captions are not saved
+in preferences.
+
+The legacy Kokoro CLI fallback, which provides no alignment metadata, uses
+approximate phrase timing proportional to the audio file's duration. No
+microphone or system audio capture is involved.
+
+Caption checks:
+
+```sh
+./scripts/test_captions.sh
+# Optional: use the Kokoro runtime's Python for its numpy/soundfile dependencies.
+GALLAXY_KOKORO_PYTHON=/path/to/runtime/bin/python ./scripts/test_captions.sh
+```
+
+### Structure and regression checks
+
+The widget window, state, layout, drawers, speakers, transport controls, theme,
+and resize bridge live in separate Swift files. The router owns request state
+and cancellation; Kokoro owns synthesis/playback. Run `scripts/test_app.sh` for
+permission and routing regressions and `scripts/test_captions.sh` for playback
+and caption checks.

@@ -5,15 +5,9 @@ other built-in telemetry.
 
 ## Text and speech providers
 
-- **Apple local speech:** Text is synthesized by macOS on the user's Mac.
-- **Kokoro local speech:** Text is synthesized by the optional Kokoro runtime
-  on the user's Mac.
-- **ElevenLabs cloud speech:** When the user selects ElevenLabs and requests
-  speech, the requested text is sent over HTTPS to ElevenLabs for synthesis.
-  ElevenLabs receives the text and the user's API credential according to its
-  own service terms and privacy policy. Gallaxy TTS does not proxy that request.
-
-No text is sent to ElevenLabs unless the ElevenLabs provider is selected.
+Kokoro is the only active speech provider. Text is synthesized locally on the
+user's Mac. The app ignores legacy cloud-provider preferences and does not read
+cloud credentials or send narration text to a cloud speech service.
 
 ## Clipboard and selected text
 
@@ -22,28 +16,27 @@ a clipboard preview. Clipboard text is held in memory only. Recent clip history
 contains only clips the user chooses to play, remains in memory for the current
 session, and is not persisted to `UserDefaults` or a file.
 
-Reading selected text requires macOS Accessibility permission. The app uses
+Startup does not request Accessibility permission. Reading selected text through
+the selection shortcut requires macOS Accessibility permission. The app uses
 that permission when the user asks it to read the current selection. Its global
 shortcut is registered with macOS as one specific key combination; the app does
 not install a general system-wide keyboard event monitor.
 
 ## Credentials and temporary files
 
-An ElevenLabs API key entered by the user is stored in macOS Keychain with
-device-only accessibility while the user is logged in and the device is
-unlocked. It is not written to application preferences or bundled with the app.
+Credentials saved by older versions remain untouched in macOS Keychain; this
+Kokoro-only version does not load, migrate, or delete them.
 
-Cloud and local neural speech may create temporary audio files for playback.
-Gallaxy TTS removes those files after playback, cancellation, or failure.
+Local speech creates temporary text, audio, and caption files. Text is removed
+after synthesis, caption files when loaded or discarded, and audio after playback,
+cancellation, or failure. Captions in the widget are held in memory.
 
 ## Network access
 
-Normal Apple and Kokoro speech playback does not require Gallaxy TTS to contact
-a Gallaxy TTS server; no such server exists. Network access is used for:
-
-- ElevenLabs synthesis when that provider is selected.
-- The optional Kokoro setup script, which downloads its pinned Python
-  dependencies and model snapshot.
+No Gallaxy TTS server exists. Kokoro setup downloads the pinned Python packages
+and model/voice assets. The runtime may check or download missing model assets
+from Hugging Face; narration text stays local. Once assets are cached, local
+synthesis can run offline.
 
 ## Questions and security reports
 

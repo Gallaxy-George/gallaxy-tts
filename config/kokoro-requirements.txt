@@ -7,3 +7,5 @@ soundfile==0.14.0
 pillow==12.3.0
 setuptools==83.0.0
 torch==2.13.0
+# Security floor for the HTTP client used by model downloads.
+urllib3==2.8.0

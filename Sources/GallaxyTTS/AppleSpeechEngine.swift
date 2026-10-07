@@ -4,6 +4,9 @@ import Foundation
 final class AppleSpeechEngine: NSObject, AVSpeechSynthesizerDelegate, @unchecked Sendable {
     private let synthesizer = AVSpeechSynthesizer()
     var speedMultiplier: Double = 1.15
+    private var activeUtterance: AVSpeechUtterance?
+    private var phrases: [(text: String, range: NSRange)] = []
+    var captionHandler: ((String) -> Void)?
     var finishHandler: (() -> Void)?
 
     override init() {
@@ -22,6 +25,8 @@ final class AppleSpeechEngine: NSObject, AVSpeechSynthesizerDelegate, @unchecked
     func speak(_ text: String) {
         stop()
         let utterance = AVSpeechUtterance(string: text)
+        activeUtterance = utterance
+        phrases = SpeechCaption.phrases(in: text)
         utterance.rate = min(AVSpeechUtteranceMaximumSpeechRate, AVSpeechUtteranceDefaultSpeechRate * Float(speedMultiplier))
         utterance.volume = 1.0
         utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
@@ -41,12 +46,23 @@ final class AppleSpeechEngine: NSObject, AVSpeechSynthesizerDelegate, @unchecked
     }
 
     func stop() {
+        activeUtterance = nil
+        phrases = []
+        captionHandler?("")
         if synthesizer.isSpeaking || synthesizer.isPaused {
             synthesizer.stopSpeaking(at: .immediate)
         }
     }
 
+    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, willSpeakRangeOfSpeechString range: NSRange, utterance: AVSpeechUtterance) {
+        guard utterance === activeUtterance else { return }
+        captionHandler?(phrases.first(where: { NSIntersectionRange($0.range, range).length > 0 })?.text ?? "")
+    }
+
     func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
+        guard utterance === activeUtterance else { return }
+        activeUtterance = nil
+        captionHandler?("")
         finishHandler?()
     }
 }

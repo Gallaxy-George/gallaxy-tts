@@ -1,38 +1,12 @@
 #!/usr/bin/env python3
 import argparse
-from importlib.metadata import PackageNotFoundError, version
 import shutil
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
-REQUIRED_RUNTIME_VERSIONS = {
-    "mlx-audio": "0.4.4",
-    "misaki": "0.9.4",
-    "soundfile": "0.14.0",
-    "Pillow": "12.3.0",
-    "setuptools": "83.0.0",
-    "torch": "2.13.0",
-}
-
-
-def validate_runtime_versions() -> None:
-    problems = []
-    for package, required in REQUIRED_RUNTIME_VERSIONS.items():
-        try:
-            installed = version(package)
-        except PackageNotFoundError:
-            problems.append(f"{package} is missing")
-            continue
-        if installed != required:
-            problems.append(f"{package} is {installed}; expected {required}")
-
-    if problems:
-        raise RuntimeError(
-            "Kokoro runtime needs an update. Run scripts/download_kokoro_assets.sh. "
-            + "; ".join(problems)
-        )
+from kokoro_runtime import validate_runtime_versions, apply_runtime_compatibility
 
 
 def newest_wav(directory: Path, prefix: str):
@@ -50,19 +24,12 @@ def generate_with_api(
     output_dir: Path,
     prefix: str,
 ) -> None:
-    from mlx_audio.tts.generate import generate_audio
+    from mlx_audio.tts.utils import load_model
+    from kokoro_captions import generate_captioned_audio
 
-    generate_audio(
-        text=args.text_file.read_text(encoding="utf-8"),
-        model=str(model_path),
-        voice=args.voice,
-        speed=args.speed,
-        lang_code=args.lang_code,
-        output_path=str(output_dir),
-        file_prefix=prefix,
-        audio_format="wav",
-        join_audio=True,
-        verbose=False,
+    generate_captioned_audio(
+        load_model(model_path), args.text_file.read_text(encoding="utf-8"),
+        output_dir / f"{prefix}.wav", args.voice, args.lang_code, args.speed,
     )
 
 
@@ -99,6 +66,7 @@ def generate_with_cli(
 
 def main() -> int:
     validate_runtime_versions()
+    apply_runtime_compatibility()
     from huggingface_hub import snapshot_download
 
     parser = argparse.ArgumentParser(description="Generate speech with Kokoro through MLX Audio.")
@@ -145,6 +113,9 @@ def main() -> int:
             return 1
 
         shutil.move(str(wav), str(args.output))
+        captions = wav.with_suffix(".captions.json")
+        if captions.exists():
+            shutil.move(str(captions), str(args.output.with_suffix(".captions.json")))
         return 0
 
 
