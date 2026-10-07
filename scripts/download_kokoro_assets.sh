@@ -57,7 +57,7 @@ fi
 MACOS_MAJOR="$(sw_vers -productVersion | cut -d. -f1)"
 if [ "$MACOS_MAJOR" -lt 14 ]; then
   echo "The current secure Kokoro runtime requires macOS 14 or newer."
-  echo "Gallaxy TTS can still use Apple's local speech on macOS 13."
+  echo "Kokoro is the only active voice; playback requires the supported runtime."
   exit 1
 fi
 

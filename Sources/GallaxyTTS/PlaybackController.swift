@@ -4,7 +4,15 @@ import Foundation
 final class PlaybackController: NSObject, AVAudioPlayerDelegate {
     private var player: AVAudioPlayer?
     private var activeFileURL: URL?
-    private var queuedFileURLs: [URL] = []
+    private struct QueuedAudio {
+        let url: URL
+        let captions: [SpeechCaption]
+        let text: String
+    }
+    private var queuedFileURLs: [QueuedAudio] = []
+    private var captions: [SpeechCaption] = []
+    private var lastCaption = ""
+    var captionHandler: ((String) -> Void)?
     private var queueIsOpen = false
     private var meterTimer: Timer?
     private var previousMeterLevel = 0.0
@@ -26,9 +34,9 @@ final class PlaybackController: NSObject, AVAudioPlayerDelegate {
         return !player.isPlaying
     }
 
-    func playFile(_ url: URL) throws {
+    func playFile(_ url: URL, captions: [SpeechCaption] = [], text: String = "") throws {
         stop()
-        try startFile(url)
+        try startFile(QueuedAudio(url: url, captions: captions, text: text))
     }
 
     func beginQueue() {
@@ -36,11 +44,12 @@ final class PlaybackController: NSObject, AVAudioPlayerDelegate {
         queueIsOpen = true
     }
 
-    func enqueueFile(_ url: URL) throws {
+    func enqueueFile(_ url: URL, captions: [SpeechCaption] = [], text: String = "") throws {
+        let item = QueuedAudio(url: url, captions: captions, text: text)
         if player == nil {
-            try startFile(url)
+            try startFile(item)
         } else {
-            queuedFileURLs.append(url)
+            queuedFileURLs.append(item)
         }
     }
 
@@ -49,19 +58,27 @@ final class PlaybackController: NSObject, AVAudioPlayerDelegate {
         finishIfIdle()
     }
 
-    private func startFile(_ url: URL) throws {
+    private func startFile(_ item: QueuedAudio) throws {
+        let url = item.url
         let nextPlayer = try AVAudioPlayer(contentsOf: url)
         nextPlayer.delegate = self
         nextPlayer.isMeteringEnabled = true
         nextPlayer.enableRate = true
         nextPlayer.rate = playbackRate
         nextPlayer.prepareToPlay()
+        captions = item.captions.isEmpty
+            ? SpeechCaption.estimated(text: item.text, duration: nextPlayer.duration)
+            : item.captions
         player = nextPlayer
         activeFileURL = url
-        if nextPlayer.play() {
-            startHandler?()
-            startMetering()
+        guard nextPlayer.play() else {
+            player = nil
+            clearCaption()
+            removeActiveFile()
+            throw NSError(domain: "GallaxyPlayback", code: 1, userInfo: [NSLocalizedDescriptionKey: "Audio playback could not start."])
         }
+        startHandler?()
+        startMetering()
     }
 
     @discardableResult
@@ -87,6 +104,7 @@ final class PlaybackController: NSObject, AVAudioPlayerDelegate {
         player = nil
         stopMetering(publishSilence: true)
         queueIsOpen = false
+        clearCaption()
         removeActiveFile()
         removeQueuedFiles()
     }
@@ -100,20 +118,20 @@ final class PlaybackController: NSObject, AVAudioPlayerDelegate {
     }
 
     func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
+        guard player === self.player else { return }
         self.player = nil
+        clearCaption()
         stopMetering(publishSilence: true)
         removeActiveFile()
-        if let nextURL = queuedFileURLs.first {
-            queuedFileURLs.removeFirst()
+        while !queuedFileURLs.isEmpty {
+            let next = queuedFileURLs.removeFirst()
             do {
-                try startFile(nextURL)
+                try startFile(next)
+                return
             } catch {
-                try? FileManager.default.removeItem(at: nextURL)
-                audioPlayerDidFinishPlaying(player, successfully: false)
+                try? FileManager.default.removeItem(at: next.url)
             }
-            return
         }
-
         finishIfIdle()
     }
 
@@ -125,7 +143,7 @@ final class PlaybackController: NSObject, AVAudioPlayerDelegate {
 
     private func removeQueuedFiles() {
         for fileURL in queuedFileURLs {
-            try? FileManager.default.removeItem(at: fileURL)
+            try? FileManager.default.removeItem(at: fileURL.url)
         }
         queuedFileURLs.removeAll()
     }
@@ -161,6 +179,11 @@ final class PlaybackController: NSObject, AVAudioPlayerDelegate {
             return
         }
 
+        let caption = captions.last(where: { $0.start <= player.currentTime })?.text ?? ""
+        if caption != lastCaption {
+            lastCaption = caption
+            captionHandler?(caption)
+        }
         player.updateMeters()
         let channels = max(1, player.numberOfChannels)
         let averagePower = (0..<channels)
@@ -178,6 +201,12 @@ final class PlaybackController: NSObject, AVAudioPlayerDelegate {
             : (previousMeterLevel * 0.24 + rawLevel * 0.76)
         previousMeterLevel = level
         levelHandler?(level)
+    }
+
+    private func clearCaption() {
+        captions = []
+        lastCaption = ""
+        captionHandler?("")
     }
 
     private func normalizedMeterLevel(from decibels: Float) -> Double {

@@ -1,92 +1,28 @@
 #!/usr/bin/env python3
 import argparse
 import contextlib
-from importlib.metadata import PackageNotFoundError, version
 import io
 import json
-import shutil
 import sys
-import tempfile
 from pathlib import Path
 
-REQUIRED_RUNTIME_VERSIONS = {
-    "mlx-audio": "0.4.4",
-    "misaki": "0.9.4",
-    "soundfile": "0.14.0",
-    "Pillow": "12.3.0",
-    "setuptools": "83.0.0",
-    "torch": "2.13.0",
-}
-
-
-def validate_runtime_versions() -> None:
-    problems = []
-    for package, required in REQUIRED_RUNTIME_VERSIONS.items():
-        try:
-            installed = version(package)
-        except PackageNotFoundError:
-            problems.append(f"{package} is missing")
-            continue
-        if installed != required:
-            problems.append(f"{package} is {installed}; expected {required}")
-
-    if problems:
-        raise RuntimeError(
-            "Kokoro runtime needs an update. Run scripts/download_kokoro_assets.sh. "
-            + "; ".join(problems)
-        )
-
-
-def newest_wav(directory: Path, prefix: str):
-    candidates = sorted(
-        directory.glob(f"{prefix}*.wav"),
-        key=lambda path: path.stat().st_mtime,
-        reverse=True,
-    )
-    return candidates[0] if candidates else None
+from kokoro_runtime import validate_runtime_versions, apply_runtime_compatibility
 
 
 def synthesize(model, request: dict, default_voice: str, default_lang_code: str) -> None:
-    from mlx_audio.tts.generate import generate_audio
+    from kokoro_captions import generate_captioned_audio
 
     text = request["text"].strip()
-    output_file = Path(request["output_file"])
-    voice = request.get("voice") or default_voice
-    lang_code = request.get("lang_code") or default_lang_code
-    speed = float(request.get("speed") or 1.0)
-
     if not text:
         raise ValueError("Empty text")
-
-    output_file.parent.mkdir(parents=True, exist_ok=True)
-    prefix = f"gallaxy_kokoro_{output_file.stem}"
-
-    with tempfile.TemporaryDirectory(prefix="gallaxy-kokoro-worker-") as tmp:
-        output_dir = Path(tmp)
-        log_buffer = io.StringIO()
-        with contextlib.redirect_stdout(log_buffer), contextlib.redirect_stderr(log_buffer):
-            try:
-                generate_audio(
-                    text=text,
-                    model=model,
-                    voice=voice,
-                    speed=speed,
-                    lang_code=lang_code,
-                    output_path=str(output_dir),
-                    file_prefix=prefix,
-                    audio_format="wav",
-                    join_audio=True,
-                    verbose=False,
-                )
-            except Exception as exc:
-                details = log_buffer.getvalue().strip()
-                raise RuntimeError(f"{exc}: {details}" if details else str(exc)) from exc
-
-        wav = newest_wav(output_dir, prefix)
-        if wav is None:
-            raise RuntimeError("Kokoro MLX generation did not create a WAV file.")
-
-        shutil.move(str(wav), str(output_file))
+    log_buffer = io.StringIO()
+    with contextlib.redirect_stdout(log_buffer), contextlib.redirect_stderr(log_buffer):
+        generate_captioned_audio(
+            model, text, request["output_file"],
+            request.get("voice") or default_voice,
+            request.get("lang_code") or default_lang_code,
+            float(request.get("speed") or 1.0),
+        )
 
 
 def warm(model, default_voice: str, default_lang_code: str) -> None:
@@ -96,6 +32,7 @@ def warm(model, default_voice: str, default_lang_code: str) -> None:
 
 def main() -> int:
     validate_runtime_versions()
+    apply_runtime_compatibility()
     from huggingface_hub import snapshot_download
     from mlx_audio.tts.utils import load_model
 

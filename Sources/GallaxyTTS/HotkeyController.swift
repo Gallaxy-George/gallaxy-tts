@@ -13,7 +13,7 @@ final class HotkeyController {
     private let selectionReader = ClipboardSelectionReader()
     private var hotKeyRef: EventHotKeyRef?
     private var eventHandler: EventHandlerRef?
-    private var didRequestAccessibilityPermission = false
+    private let accessibilityPermission = AccessibilityPermission()
     private var activeConfiguration: HotkeyConfiguration?
 
     init(router: SpeechRequestRouter) {
@@ -30,7 +30,6 @@ final class HotkeyController {
     }
 
     func start() {
-        requestAccessibilityIfNeeded()
         let handlerStatus = installEventHandler()
         guard handlerStatus == noErr else {
             hotkeyLogger.error("Could not install hotkey event handler status=\(handlerStatus, privacy: .public)")
@@ -81,7 +80,7 @@ final class HotkeyController {
         restoreApplication: NSRunningApplication?,
         beepOnFailure: Bool = true
     ) -> Bool {
-        guard accessibilityIsTrusted(promptIfNeeded: true) else {
+        guard accessibilityPermission.checkForSelection() else {
             if beepOnFailure {
                 NSSound.beep()
             }
@@ -198,22 +197,4 @@ final class HotkeyController {
         }
     }
 
-    private func requestAccessibilityIfNeeded() {
-        if !accessibilityIsTrusted(promptIfNeeded: true) {
-            hotkeyLogger.error("Hotkey listener is waiting for Accessibility access")
-            NSLog("Gallaxy TTS accessibility access is not enabled. Selection hotkey may not work until it is granted in System Settings.")
-        }
-    }
-
-    private func accessibilityIsTrusted(promptIfNeeded: Bool) -> Bool {
-        guard promptIfNeeded, !didRequestAccessibilityPermission else {
-            return AXIsProcessTrusted()
-        }
-
-        didRequestAccessibilityPermission = true
-        let options = [
-            kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true
-        ] as CFDictionary
-        return AXIsProcessTrustedWithOptions(options)
-    }
 }

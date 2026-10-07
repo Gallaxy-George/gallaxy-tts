@@ -27,14 +27,14 @@ PY
 
 SCAN_PATTERN='sk-[A-Za-z0-9_-]{20,}|AIza[0-9A-Za-z_-]{20,}|-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----|AKIA[0-9A-Z]{16}|ghp_[0-9A-Za-z]{20,}|github_pat_[0-9A-Za-z_]{20,}|xox[baprs]-[0-9A-Za-z-]{10,}'
 if rg -n -I --hidden -S "$SCAN_PATTERN" \
-  -g '!.git/**' -g '!build/**' -g '!dist/**' -g '!backups/**'; then
+  -g '!.git' -g '!.git/**' -g '!build/**' -g '!dist/**' -g '!backups/**'; then
   echo "A credential-like value was found in publishable source." >&2
   exit 1
 fi
 
 if rg -n -I --hidden -S '(/Users/[^/[:space:]"'\'']+|[A-Za-z]:\\Users\\[^\\[:space:]"'\'']+)' \
   -g '!scripts/validate_source.sh' \
-  -g '!.git/**' -g '!build/**' -g '!dist/**' -g '!backups/**'; then
+  -g '!.git' -g '!.git/**' -g '!build/**' -g '!dist/**' -g '!backups/**'; then
   echo "A machine-specific user path was found in publishable source." >&2
   exit 1
 fi

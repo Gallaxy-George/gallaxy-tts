@@ -61,6 +61,10 @@ final class KokoroEngine {
         }
     }
 
+    var captionHandler: ((String) -> Void)? {
+        didSet { playback.captionHandler = captionHandler }
+    }
+
     var levelHandler: ((Double) -> Void)? {
         didSet {
             playback.levelHandler = levelHandler
@@ -149,21 +153,25 @@ final class KokoroEngine {
                     DispatchQueue.main.async { [weak self] in
                         guard let self else { return }
                         guard shouldPlay() else {
+                            _ = SpeechCaption.load(for: outputURL)
                             try? self.fileManager.removeItem(at: outputURL)
                             completion(.failure(KokoroSpeechError.cancelled))
                             return
                         }
 
                         do {
-                            try self.playback.playFile(outputURL)
+                            try self.playback.playFile(outputURL, captions: SpeechCaption.load(for: outputURL), text: text)
                             completion(.success(()))
                         } catch {
+                            _ = SpeechCaption.load(for: outputURL)
                             try? self.fileManager.removeItem(at: outputURL)
                             completion(.failure(error))
                         }
                     }
                     return
                 } catch {
+                    _ = SpeechCaption.load(for: outputURL)
+                    try? fileManager.removeItem(at: outputURL)
                     kokoroLogger.error("Kokoro worker failed error=\(error.localizedDescription, privacy: .private)")
                     resetWorker()
                     completion(.failure(error))
@@ -201,12 +209,14 @@ final class KokoroEngine {
             clearActiveProcess(process)
 
             guard shouldPlay() else {
+                _ = SpeechCaption.load(for: outputURL)
                 try? fileManager.removeItem(at: outputURL)
                 completion(.failure(KokoroSpeechError.cancelled))
                 return
             }
 
             guard process.terminationStatus == 0 else {
+                _ = SpeechCaption.load(for: outputURL)
                 try? fileManager.removeItem(at: outputURL)
                 let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
                 let message = String(data: errorData, encoding: .utf8) ?? "Kokoro exited with status \(process.terminationStatus)."
@@ -217,15 +227,17 @@ final class KokoroEngine {
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 guard shouldPlay() else {
+                    _ = SpeechCaption.load(for: outputURL)
                     try? self.fileManager.removeItem(at: outputURL)
                     completion(.failure(KokoroSpeechError.cancelled))
                     return
                 }
 
                 do {
-                    try self.playback.playFile(outputURL)
+                    try self.playback.playFile(outputURL, captions: SpeechCaption.load(for: outputURL), text: text)
                     completion(.success(()))
                 } catch {
+                    _ = SpeechCaption.load(for: outputURL)
                     try? self.fileManager.removeItem(at: outputURL)
                     completion(.failure(error))
                 }
@@ -236,8 +248,9 @@ final class KokoroEngine {
     }
 
     func stop() {
-        DispatchQueue.main.async { [playback] in
-            playback.stop()
+        _ = performPlaybackMutation {
+            $0.stop()
+            return true
         }
     }
 
@@ -257,69 +270,30 @@ final class KokoroEngine {
     }
 
     private var kokoroInvocation: KokoroInvocation? {
-        if let venvPython = existingExecutableAppSupportFile("KokoroRuntime/venv/bin/python"),
-           let helper = existingResource("kokoro_synth.py") {
-            return KokoroInvocation(
-                executableURL: venvPython,
-                leadingArguments: [helper.path],
-                environment: [
-                    "PATH": "\(venvPython.deletingLastPathComponent().path):/usr/bin:/bin:/usr/sbin:/sbin",
-                    "PYTHONNOUSERSITE": "1"
-                ]
-            )
-        }
-
-        if let venvPython = existingExecutableResource("KokoroRuntime/venv/bin/python"),
-           let helper = existingResource("kokoro_synth.py") {
-            return KokoroInvocation(
-                executableURL: venvPython,
-                leadingArguments: [helper.path],
-                environment: [
-                    "PATH": "\(venvPython.deletingLastPathComponent().path):/usr/bin:/bin:/usr/sbin:/sbin",
-                    "PYTHONNOUSERSITE": "1"
-                ]
-            )
-        }
-
-        if let pythonPath = ProcessInfo.processInfo.environment["GALLAXY_KOKORO_PYTHON"],
-           fileManager.isExecutableFile(atPath: pythonPath),
-           let helper = existingResource("kokoro_synth.py") {
-            return KokoroInvocation(
-                executableURL: URL(fileURLWithPath: pythonPath),
-                leadingArguments: [helper.path],
-                environment: nil
-            )
-        }
-
-        return nil
+        invocation(helper: "kokoro_synth.py")
     }
 
     private var workerInvocation: KokoroInvocation? {
-        if let venvPython = existingExecutableAppSupportFile("KokoroRuntime/venv/bin/python"),
-           let worker = existingResource("kokoro_worker.py") {
-            return KokoroInvocation(
-                executableURL: venvPython,
-                leadingArguments: [worker.path],
-                environment: [
-                    "PATH": "\(venvPython.deletingLastPathComponent().path):/usr/bin:/bin:/usr/sbin:/sbin",
-                    "PYTHONNOUSERSITE": "1"
-                ]
-            )
-        }
+        invocation(helper: "kokoro_worker.py")
+    }
 
-        if let venvPython = existingExecutableResource("KokoroRuntime/venv/bin/python"),
-           let worker = existingResource("kokoro_worker.py") {
-            return KokoroInvocation(
-                executableURL: venvPython,
-                leadingArguments: [worker.path],
-                environment: [
-                    "PATH": "\(venvPython.deletingLastPathComponent().path):/usr/bin:/bin:/usr/sbin:/sbin",
-                    "PYTHONNOUSERSITE": "1"
-                ]
-            )
+    private func invocation(helper name: String) -> KokoroInvocation? {
+        guard let helper = existingResource(name) else { return nil }
+        // An explicit developer runtime applies consistently to both helpers.
+        if let path = ProcessInfo.processInfo.environment["GALLAXY_KOKORO_PYTHON"],
+           fileManager.isExecutableFile(atPath: path) {
+            return KokoroInvocation(executableURL: URL(fileURLWithPath: path), leadingArguments: [helper.path], environment: nil)
         }
-
-        return nil
+        guard let python = existingExecutableAppSupportFile("KokoroRuntime/venv/bin/python")
+            ?? existingExecutableResource("KokoroRuntime/venv/bin/python") else { return nil }
+        return KokoroInvocation(
+            executableURL: python,
+            leadingArguments: [helper.path],
+            environment: [
+                "PATH": "\(python.deletingLastPathComponent().path):/usr/bin:/bin:/usr/sbin:/sbin",
+                "PYTHONNOUSERSITE": "1"
+            ]
+        )
     }
 
     private func existingResource(_ relativePath: String) -> URL? {

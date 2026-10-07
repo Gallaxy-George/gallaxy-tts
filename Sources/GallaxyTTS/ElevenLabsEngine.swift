@@ -63,6 +63,10 @@ final class ElevenLabsEngine {
         }
     }
 
+    var captionHandler: ((String) -> Void)? {
+        didSet { playback.captionHandler = captionHandler }
+    }
+
     var levelHandler: ((Double) -> Void)? {
         didSet {
             playback.levelHandler = levelHandler
@@ -234,7 +238,7 @@ final class ElevenLabsEngine {
                     }
 
                     do {
-                        try self.playback.enqueueFile(fileURL)
+                        try self.playback.enqueueFile(fileURL, text: chunk)
                         elevenLabsLogger.info("ElevenLabs chunk queued index=\(index + 1, privacy: .public) total=\(chunks.count, privacy: .public) chars=\(chunk.count, privacy: .public) bytes=\(data.count, privacy: .public) elapsedMs=\(elapsedMilliseconds(since: chunkStartedAt), privacy: .public)")
                         self.requestChunk(
                             index: index + 1,

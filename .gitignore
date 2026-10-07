@@ -42,7 +42,6 @@ pip-wheel-metadata/
 # Secrets and local credentials
 .env
 .env.*
-!.env.example
 *.pem
 *.p12
 *.key
